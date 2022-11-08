@@ -1,0 +1,90 @@
+/media/julio/Storage/Software/bbmap/bbduk.sh
+in=usftp21.novogene.com/raw_data/JA_MPN/JA_MPN_CKDL200165811-1a_HCGJLBBXX_L8_1.fq.gz
+in2=usftp21.novogene.com/raw_data/JA_MPN/JA_MPN_CKDL200165811-1a_HCGJLBBXX_L8_2.fq.gz
+ref=phix,adapters,artifacts
+out=multiplexed_no_adapters.1.fastq.gz
+out2=multiplexed_no_adapters.2.fastq.gz
+stats=bbduk_stats.txt
+refstats=bbduk_refstats.txt
+
+/media/julio/Storage/Software/bbmap/demuxbyname.sh
+in=multiplexed_no_adapters.1.fastq.gz
+in2=multiplexed_no_adapters.2.fastq.gz
+delimiter=:
+prefixmode=f
+out=raw_demuxed_data/%_#.fastq.gz
+names=barcodes.txt
+stats=demux_stats.txt
+
+for i in {1..173}; do
+barcode=$(awk "NR == ${i}" barcodes.txt)
+name=$(awk "NR == ${i}" names.txt)
+mv ${barcode}_1.fastq.gz ${name}_1.fastq.gz
+mv ${barcode}_2.fastq.gz ${name}_2.fastq.gz;
+done
+
+while read x; do
+echo -n "${x} "
+echo $(zcat raw_demuxed_data/${x}_1.fastq.gz|wc -l)/4|bc;
+done < names.txt > raw_read_counts.txt
+
+mkdir fastQC_out_preQC
+/media/julio/Storage/Software/FastQC/fastqc raw_demuxed_data/*.fastq.gz -o fastQC_out_preQC -t 8
+rm fastQC_out_preQC/*.zip
+
+while read x; do
+echo ${x}
+prinseq++ -fastq raw_demuxed_data/${x}_1.fastq.gz -fastq2 raw_demuxed_data/${x}_2.fastq.gz -trim_left 5 -trim_right 5 -min_len 100 -trim_qual_right 28 -min_qual_mean 25 -threads 30 -out_name ${x};
+done < names.txt >> qual_filter_log.txt
+
+mkdir QF_seqs
+rm *bad*
+rm *single*
+mv *good* QF_seqs/
+
+pigz QF_seqs/*
+
+mkdir fastQC_out_postQC
+/media/julio/Storage/Software/FastQC/fastqc QF_seqs/*.fastq.gz -o fastQC_out_postQC -t 32
+rm fastQC_out_postQC/*.zip
+
+while read x; do
+echo -n "${x} "
+echo $(zcat QF_seqs/${x}_good_out_R1.fastq.gz|wc -l)/4|bc;
+done < names.txt > QF_read_counts.txt
+
+mkdir QF_nonhuman_seqs
+while read x; do
+bowtie2 -x /media/julio/Storage1/DBs/hg38/hg38 -1 QF_seqs/${x}_*R1* -2 QF_seqs/${x}_*R2* -p 32 --quiet --un-conc QF_nonhuman_seqs/${x};
+done < names.txt
+
+cd QF_nonhuman_seqs
+rename 's/$/.fastq/' *
+cd ../
+pigz QF_seqs/*.fastq
+
+while read x; do
+echo -n "${x} "
+echo $(zcat QF_nonhuman_seqs/${x}.1.fastq.gz|wc -l)/4|bc;
+done < names.txt > NH_read_counts.txt
+
+#metaphlan3
+for i in QF_nonhuman_seqs/*.1.fastq.gz; do basename ${i} .1.fastq.gz; done > metaphlan3/sample_list.txt
+
+while read i; do
+metaphlan QF_nonhuman_seqs/${i}.1.fastq.gz,QF_nonhuman_seqs/${i}.2.fastq.gz --input_type fastq --bowtie2out metaphlan3/${i}_bt2.txt --bowtie2db /media/julio/Storage/Software/metaphlan3_db --add_viruses --nproc 32 -o metaphlan3/${i}_relab.txt;
+done < metaphlan3/sample_list.txt
+
+#Humann3
+while read i; do humann --input QF_nonhuman_seqs/${i}.merged.fastq.gz -o humann3/${i}.humann/ --threads 10; done < sample_list.txt
+while read i; do humann_renorm_table -i humann3/${i}.humann/${i}.merged_pathabundance.tsv -o humann3/${i}.humann/${i}_RPK_pathabundance.tsv; done < sample_list.txt
+humann_join_tables -i . -o MPN_pathabundance_CPM.tsv --file_name RPK_pathabundance -s
+
+#Megahit was performed on hpc. See megahit.sh
+
+#Microbecensus
+for i in QF_nonhuman_seqs/*.1.fastq.gz; do tmp=$(basename ${i} .1.fastq.gz); run_microbe_census.py -t 32 QF_nonhuman_seqs/${tmp}.1.fastq.gz,QF_nonhuman_seqs/${tmp}.2.fastq.gz microbe_census/${tmp}.txt; done
+for i in QF_nonhuman_seqs/*.1.fastq.gz; do tmp=$(basename ${i} .1.fastq.gz); echo -n "${tmp} "; awk 'FNR == 13 {print $2}' microbe_census/${tmp}.txt; done >> mic_cense_genome_equivs_merged.txt
+
+#reformat.sh
+while read i; do /media/julio/Storage/Software/bbmap/reformat.sh in1=QF_nonhuman_seqs/${i}.1.fastq.gz in2=QF_nonhuman_seqs/${i}.2.fastq.gz out=QF_nonhuman_seqs/${i}.merged.fastq.gz threads=32; done < names2.txt

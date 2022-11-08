@@ -1,0 +1,1241 @@
+---
+title: "MPN_analysis"
+author: "Julio Avelar-Barragan"
+date: "10/17/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, cache = F)
+options(scipen=10000, digits = 12)
+set.seed(seed = 999)
+```
+
+```{r warning=FALSE, include=FALSE}
+library(rfPermute)
+library(tidyverse)
+library(vegan)
+library(ggpubr)
+library(ggsci)
+library(nlme)
+library(car)
+library(Hmisc)
+
+source("/media/julio/Storage/Software/ANCOM-master/programs/ancom.R")
+
+setwd("/media/julio/Storage/MPN/")
+metadata <- read.delim("/media/julio/Storage/MPN/MPN_metadata.txt", row.names=1, check.names = F)
+metadata$Subject <- as.factor(metadata$Subject)
+OTU_table <- read.delim("/media/julio/Storage/MPN/metaphlan3/OTU_table_relab.txt", header = T, check.names = F, comment.char = "#", row.names = 1)
+```
+
+# Read count data:
+```{r warning=FALSE}
+read_counts_raw <- read.table("raw_read_counts.txt", check.names = F)
+read_counts_QF <- read.table("QF_read_counts.txt", check.names = F)
+read_counts_NH <- read.table("NH_read_counts.txt", check.names = F)
+
+read_counts_all <- merge(read_counts_raw, read_counts_QF, by = "V1")
+read_counts_all <- merge(read_counts_all, read_counts_NH, by = "V1")
+names(read_counts_all) <- c("SampleID", "Raw", "QF", "QF+Decon")
+
+read_counts_all <- reshape2::melt(read_counts_all) %>% merge(., metadata, by.x = "SampleID", by.y = "row.names")
+
+ggplot(data = read_counts_all) +
+  aes(x = dna_extraction, y = value, fill = variable) +
+  geom_boxplot() +
+  labs(y = 'PE150 read count') +
+  theme_classic(base_size = 14) +
+  geom_point(position = position_jitterdodge(jitter.width = .2))
+```
+
+# Determination of contaminants and filtering.  
+Notes:  
+*Subject 13 failed to complete the trail, will remove them.  
+*FEA-03 had 10k reads, the rest (ending in x.2) are technical replicates in case the originals didn't sequence.
+```{r warning=FALSE}
+OTU_table_counts <- as.data.frame(t(OTU_table[,-1])) %>% rownames_to_column() %>% mutate(., rowname = str_replace(rowname, "_relab", "")) %>% mutate(., rowname = str_replace(rowname, "_", "\\.")) %>% merge(., read_counts_NH, by.x = "rowname", by.y = "V1") %>% column_to_rownames("rowname")
+OTU_table_counts <- ((OTU_table_counts[,-ncol(OTU_table_counts)])*OTU_table_counts$V2)/100
+
+species_OTU_table <- OTU_table_counts[,grep("s__", colnames(OTU_table_counts))] 
+
+#Check to see if there are any contaminants. Only 10 taxa should be there. See:
+# https://files.zymoresearch.com/protocols/_d6305_d6306_zymobiomics_microbial_community_dna_standard.pdf
+pos_ctrl <-species_OTU_table[grep("Comm.std", rownames(species_OTU_table)),] %>% .[,!(colSums(.) == 0)] #Comm.std-001-3 seems like it got cross contaminated. Lots of phages in zymo's standard, maybe we should tell them.
+neg_ctrl <-species_OTU_table[grep("Neg.ctrl", rownames(species_OTU_table)),] %>% .[,!(colSums(.) == 0)]
+
+#Filter out contaminants.
+contaminants <- c("k__Viruses|p__Viruses_unclassified|c__Viruses_unclassified|o__Herpesvirales|f__Alloherpesviridae|g__Cyprinivirus|s__Cyprinid_herpesvirus_3", colnames(neg_ctrl))
+species_OTU_table <- species_OTU_table[, !(colnames(species_OTU_table) %in% contaminants)]
+
+species_OTU_table_noctrls <- species_OTU_table[-grep("Neg.ctrl", rownames(species_OTU_table)),] %>% 
+  .[-grep("Comm.std", rownames(.)),] %>% merge(metadata, ., by = "row.names") %>% column_to_rownames("Row.names")
+species_OTU_table_noctrls <- species_OTU_table_noctrls[!(species_OTU_table_noctrls$Subject == "13"),]
+species_OTU_table_noctrls <- species_OTU_table_noctrls[!(row.names(species_OTU_table_noctrls) %in% c("FEA03-9", "FEA24-6.2", "FEA24-9.2", "FEA25-1.2", "FEA26-1.2", "FEA26-15.2", "FEA26-6.2")),]
+
+species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)] <- (species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)]/rowSums(species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)]))*100
+```
+
+# Alpha diversity  
+## Shannon
+```{r warning=FALSE}
+alpha_div <- as.data.frame(diversity(species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)], index = "shannon"))
+
+alpha_div <- merge(alpha_div, metadata, by = "row.names")
+names(alpha_div)[[2]] <- "Shannon"
+```
+
+Shannon diversity by MPN subtype.  
+```{r warning=FALSE}
+ggplot(data = alpha_div) +
+  aes(x = MPN, y = Shannon, fill = as.character(MPN)) +
+  geom_boxplot(outlier.shape = NA, lwd = 1) +
+  theme_bw(base_size = 14, base_line_size = 1) +
+  labs(x = NULL, y = 'Shannon index', fill = 'MPN type', title = bquote("Individuals:"~.(length(unique(alpha_div$Subject))))) +
+  geom_point(position = position_jitterdodge(jitter.width = .05), alpha = .5) +
+  scale_fill_npg()
+```
+
+```{r}
+qqp(alpha_div$Shannon, "norm") #Follows the dist. well.
+
+alpha_lm <- NULL
+alpha_lm$x <- as.numeric(alpha_div$Shannon)
+alpha_lm$y <- as.factor(alpha_div$MPN)
+alpha_lm$d <- as.factor(alpha_div$Diet)
+alpha_lm$z <- as.factor(alpha_div$dna_extraction)
+alpha_lm$i <- as.factor(alpha_div$Subject)
+alpha_lm <- as.data.frame(alpha_lm)
+
+alpha_lm <- within(alpha_lm, z <- relevel(z, "third"))
+alpha_lm <- within(alpha_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y + d, data = alpha_lm, random = list(i=~1, z=~1)))
+```
+
+```{r warning=FALSE}
+ggplot(data = alpha_div) +
+  geom_boxplot(aes(x = as.factor(week), y = Shannon, fill = adherance_score), outlier.shape = NA, lwd = 1) +
+  #geom_line(aes(x = as.factor(alpha_div$week), y = as.numeric(alpha_div$Shannon),  group = as.factor(alpha_div$Subject), linetype = MPN)) +
+  geom_point(aes(x = as.factor(week), y = as.numeric(Shannon), fill = adherance_score), size = 2, position = position_jitterdodge(), alpha = 0.5) +
+  facet_wrap(Diet ~ .) +
+  theme_bw() +
+  labs(y = "Shannon diversity", x = "Week", fill = "Adherance Score")
+```
+
+Shannon diversity of individuals on MED diet who are not highly adherent at time point 1 (pre-intervention).
+
+```{r message=FALSE, warning=FALSE}
+remove_subject <- filter(alpha_div, Diet == "MED", week == 1, adherance_score == "high")
+
+ggplot(data = alpha_div[alpha_div$Diet == "MED" & !(alpha_div$Subject %in% remove_subject$Subject),]) +
+  geom_line(aes(x = as.factor(week), y = as.numeric(Shannon),  group = as.factor(Subject), linetype = MPN)) +
+  geom_point(aes(x = as.factor(week), y = as.numeric(Shannon), color = adherance_score)) +
+  facet_wrap(Subject+MPN ~ .) +
+  theme_bw() +
+  labs(y = "Shannon diversity", x = "Week", color = "Adherance Score")
+```
+
+## Species counts
+```{r warning=FALSE}
+specno <- as.data.frame(specnumber(species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)]))
+specno <- merge(specno, metadata, by = "row.names")
+names(specno)[[2]] <- "specno"
+```
+
+```{r}
+qqp(specno$specno, "norm") #Follows the dist. pretty well.
+
+specno_lm <- NULL
+specno_lm$x <- as.numeric(specno$specno)
+specno_lm$y <- as.factor(specno$MPN)
+specno_lm$d <- as.factor(specno$Diet)
+specno_lm$z <- as.factor(specno$dna_extraction)
+specno_lm$i <- as.factor(specno$Subject)
+specno_lm$t <- as.factor(specno$week)
+specno_lm <- as.data.frame(specno_lm)
+
+specno_lm <- within(specno_lm, z <- relevel(z, "third"))
+specno_lm <- within(specno_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y + d, data = specno_lm, random = list(i=~1, z=~1))) #Tests whether there are significant differences between MPN and diet groups while accounting for reapeated measurements and plate effects. Does the testing overall across all time points. 
+summary(lme(x ~ d, data = specno_lm, random = list(t=~1, z=~1))) # Test for significant differences between diet groups across individual time points (Inherently no repeated measurements)
+```
+
+```{r}
+plot1 <- ggplot(data = specno) +
+  aes(x = as.factor(MPN), y = specno, fill = MPN) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(fill = "black", alpha = 0.5) +
+  theme_bw() +
+  labs(x = NULL, y = "Richness", title = "") +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  scale_shape_manual(values=c(21,24)) +
+  theme(legend.position = "none") +
+  scale_x_discrete(labels = c("ET (22)", "MF (26)", "PV (52)"))
+plot1
+```
+
+```{r warning=FALSE}
+ggplot(data = specno) +
+  geom_boxplot(aes(x = as.factor(week), y = specno, fill = adherance_score), outlier.shape = NA, lwd = 1) +
+  #geom_line(aes(x = as.factor(week), y = as.numeric(specno),  group = as.factor(Subject), linetype = MPN)) +
+  geom_point(aes(x = as.factor(week), y = as.numeric(specno), fill = adherance_score), size = 2, position = position_jitterdodge(), alpha = 0.5) +
+  facet_wrap(Diet ~ .) +
+  theme_bw() +
+  labs(x = "Week", y = "Richness", fill = "Adherance Score")
+```
+
+Richness of individuals on MED diet who are not highly adherant at time point 1 (pre-intervention).
+
+```{r message=FALSE, warning=FALSE}
+ggplot(data = specno[specno$Diet == "MED" & !(specno$Subject %in% remove_subject$Subject),]) +
+  geom_line(aes(x = as.factor(week), y = as.numeric(specno),  group = as.factor(Subject), linetype = MPN)) +
+  geom_point(aes(x = as.factor(week), y = as.numeric(specno), color = adherance_score)) +
+  facet_wrap(Subject+MPN ~ .) +
+  theme_bw() +
+  labs(y = "Richness", x = "Week", color = "Adherance Score")
+```
+
+```{r}
+specno$evenness <- alpha_div$Shannon/log(specno$specno)
+specno_lm$e <- as.numeric(specno$evenness)
+```
+
+```{r}
+even_lm <- NULL
+even_lm$x <- as.numeric(specno$evenness)
+even_lm$y <- as.factor(specno$MPN)
+even_lm$d <- as.factor(specno$Diet)
+even_lm$z <- as.factor(specno$dna_extraction)
+even_lm$i <- as.factor(specno$Subject)
+even_lm <- as.data.frame(even_lm)
+
+even_lm <- within(even_lm, z <- relevel(z, "third"))
+even_lm <- within(even_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y + d, data = even_lm, random = list(i=~1, z=~1)))
+```
+
+```{r}
+ggplot(data = specno[specno$Diet == "MED" & !(specno$Subject %in% remove_subject$Subject),]) +
+  geom_line(aes(x = as.factor(week), y = as.numeric(evenness),  group = as.factor(Subject), linetype = MPN)) +
+  geom_point(aes(x = as.factor(week), y = as.numeric(evenness), color = adherance_score)) +
+  facet_wrap(Subject+MPN ~ .) +
+  theme_bw() +
+  labs(y = "Evenness", x = "Week", color = "Adherance Score")
+```
+
+Richness and evenness of samples by subtype.  
+```{r}
+plot2 <- ggplot(data = specno) +
+  aes(x = as.factor(MPN), y = evenness, fill = MPN) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(fill = "black", alpha = 0.5) +
+  theme_bw() +
+  labs(x = NULL, y = "Evenness", title = "") +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  scale_shape_manual(values=c(21,24)) +
+  scale_x_discrete(labels = c("ET (22)", "MF (26)", "PV (52)")) +
+  theme(legend.position = "none")
+plot2
+
+alpha_plot <- ggarrange(plot1, plot2, labels = c("a", "b"))
+alpha_plot
+
+#ggsave("alpha_div.png", ggarrange(plot1, plot2), device = "png", height = 4, width = 6, dpi = 300)
+```
+
+Plotted by diet.  
+```{r}
+rich_plot_df = specno %>% group_by(Diet, week) %>% summarise(Avg_rich = mean(specno), Avg_even = mean(evenness), sd_rich = sd(specno), sd_even = sd(evenness), n = n(), stderr_rich = sd_rich/sqrt(n), stderr_even = sd_even/sqrt(n))
+
+rich_plot = ggplot(data = specno) +
+  aes(x = week, y = specno, fill = MPN, pch = Diet) + 
+  geom_point(size = 4, alpha = 0.6, position = position_dodge(.75)) +
+  geom_text(color = "black", size = 2, position = position_dodge(.75), label = specno$Subject) +
+  geom_path(data = rich_plot_df, inherit.aes = F, aes(x = week, y = Avg_rich, color = Diet), size = 2, alpha = 3/4) + 
+  #eom_jitter(data = specno, aes(x = week, y = specno, color = MPN), size = 0.5, width = .5) +
+  geom_errorbar(data = rich_plot_df, inherit.aes = F, aes(x = week, y = Avg_rich, color = Diet, ymin = Avg_rich - stderr_rich, ymax = Avg_rich + stderr_rich), width = 1, size = 1.5) +
+  annotate("rect", xmin=3, xmax= 13, ymin = -Inf, ymax = Inf, alpha = 0.2, fill = "gray") +
+  theme_bw() +
+  labs(y = "Richness", x = "Week", fill = "Subtype") +
+  scale_fill_manual(values = c("steelblue", "orange", "firebrick3")) +
+  scale_shape_manual(values = c(21,24)) +
+  scale_color_manual(values = c("forestgreen", "orchid")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+rich_plot
+```
+
+Evenness plot.  
+```{r}
+even_plot = ggplot(data = specno) +
+  aes(x = week, y = evenness, fill = MPN, pch = Diet) + 
+  geom_point(size = 4, alpha = 0.6, position = position_dodge(.75)) +
+  geom_text(color = "black", size = 2, position = position_dodge(.75), label = specno$Subject) +
+  geom_path(data = rich_plot_df, inherit.aes = F, aes(x = week, y = Avg_even, color = Diet), size = 2, alpha = 3/4) + 
+  geom_errorbar(data = rich_plot_df, inherit.aes = F, aes(x = week, y = Avg_even, color = Diet, ymin = Avg_even - stderr_even, ymax = Avg_even + stderr_even), width = 1, size = 1.5) +
+  annotate("rect", xmin=3, xmax= 13, ymin = -Inf, ymax = Inf, alpha = 0.2, fill = "gray") +
+  theme_bw() +
+  labs(y = "Evenness", x = "Week", fill = "Subtype") +
+  scale_fill_manual(values = c("steelblue", "orange", "firebrick3")) +
+  scale_shape_manual(values = c(21,24)) +
+  scale_color_manual(values = c("forestgreen", "orchid")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+even_plot
+```
+
+Figure 2.  
+```{r}
+fig2ab = ggarrange(rich_plot, even_plot, nrow = 1, labels = c("a.", "b."), common.legend = T, legend = "right")
+```
+
+There are significant differences in the Shannon and richness diversity of both diet groups at baseline.  
+Need to subtract baseline and look at change over time.  
+```{r}
+subtract_specno = specno %>% group_by(Subject) %>% filter(1 %in% week) %>% mutate(Diff = (specno - specno[week == 1]))
+
+ggplot(data = subtract_specno) +
+  aes(x = as.factor(week), y = Diff, fill = Diet) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  theme_bw() +
+  labs(x = "Week", y = "Richness change over time")
+```
+
+Significance testing for subtraction of time point one.  
+```{r}
+specno_lm <- NULL
+specno_lm$x <- as.numeric(subtract_specno$Diff)
+specno_lm$y <- as.factor(subtract_specno$MPN)
+specno_lm$d <- as.factor(subtract_specno$Diet)
+specno_lm$t <- as.factor(subtract_specno$week)
+specno_lm$z <- as.factor(subtract_specno$dna_extraction)
+specno_lm$i <- as.factor(subtract_specno$Subject)
+specno_lm <- as.data.frame(specno_lm)
+
+specno_lm <- within(specno_lm, z <- relevel(z, "third"))
+specno_lm <- within(specno_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y + d, data = specno_lm, random = list(i=~1, z=~1))) #Tests whether there are significant differences between MPN and diet groups while accounting for reapeated measurements and plate effects. Does the testing overall across all time points. 
+summary(lme(x ~ d, data = specno_lm, random = list(t=~1, z=~1))) # Test for significant differences between diet groups across individual time points (Inherently no repeated measurements)
+```
+
+Repeat for evenness.  
+```{r}
+subtract_even = specno %>% group_by(Subject) %>% filter(1 %in% week) %>% mutate(Diff = (evenness - evenness[week == 1]))
+
+ggplot(data = subtract_even) +
+  aes(x = as.factor(week), y = Diff, fill = Diet) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  theme_bw() +
+  labs(x = "Week", y = "Evenness change over time")
+```
+
+Significance testing for evenness subtraction.  
+```{r}
+even_lm <- NULL
+even_lm$x <- as.numeric(subtract_even$Diff)
+even_lm$y <- as.factor(subtract_even$MPN)
+even_lm$d <- as.factor(subtract_even$Diet)
+even_lm$t <- as.factor(subtract_even$week)
+even_lm$z <- as.factor(subtract_even$dna_extraction)
+even_lm$i <- as.factor(subtract_even$Subject)
+even_lm <- as.data.frame(even_lm)
+
+even_lm <- within(even_lm, z <- relevel(z, "third"))
+even_lm <- within(even_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y + d, data = even_lm, random = list(i=~1, z=~1))) #Tests whether there are significant differences between MPN and diet groups while accounting for reapeated measurements and plate effects. Does the testing overall across all time points. 
+summary(lme(x ~ d, data = even_lm, random = list(t=~1, z=~1))) # Test for significant differences between diet groups across individual time points (Inherently no repeated measurements)
+```
+
+Conclusion for alpha diversity:  
+* There are significant differences between MPN subtypes in richness, but not evenness.  
+* There are significant differences between diet groups in richness, but not evenness.  
+* This difference in diet is because of initial differences at time point one.  
+* When controlling for the difference in baseline, there is no difference in richness between diets overall and across individual weeks.  
+
+# Beta Diversity  
+For whatever reason, NMDS doesn't converge when embedded in a markdown file.
+```{r warning=FALSE, include=FALSE}
+MDS_out <- metaMDS(species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)], trymax = 999)
+MDS_points <- as.data.frame(MDS_out$points) %>% merge(., metadata, by = "row.names") %>% arrange(., Subject, week)
+```
+
+NMDS by MPN subtype.  
+```{r warning=FALSE}
+cytokine_no_NA = MDS_points[,c(1,22:31)] %>% column_to_rownames(var = "Row.names") %>% replace(is.na(.), 0) #Envfit does not want NA values but they are NA because they are below the limit of detection, so might as well substitute with 0 since envfit is descriptive mostly.
+cytokine_envfit = envfit(ord = MDS_out, env = cytokine_no_NA) 
+cytokine_envfit2 = as.data.frame(scores(cytokine_envfit, display = "vectors")) %>% rownames_to_column()
+
+MDS_points$week = factor(MDS_points$week, levels = c(1,6,9,15))
+MDS_points = MDS_points %>% arrange(Subject, week)
+
+beta_plot <- ggplot(data = MDS_points) +
+  aes(x = MDS1, y = MDS2, color = MPN) +
+  stat_ellipse(aes(linetype = MPN), show.legend = F) +
+  #geom_segment(data = cytokine_envfit2, aes(x = 0, xend = NMDS1, y = 0, yend = NMDS2), arrow = arrow(length = unit(0.25, "cm")), colour = "black") + #envfit line
+  geom_text(label = MDS_points$Subject, size = 6, alpha = .7) +
+  #geom_text(data = cytokine_envfit2, aes(x = NMDS1, y = NMDS2+.05, label = rowname), inherit.aes = F, size = 5) + #envfit line
+  theme_bw() + 
+  scale_color_manual(values=c("steelblue", "orange", "firebrick3")) +
+  theme(axis.text = element_text(size = 12), axis.title = element_text(size = 16), legend.title = element_text(size = 16), legend.text = element_text(size = 12))
+  #annotate("text", x = -0.9, y = 1, size = 5, label = bquote("Stress ="~.(round(MDS_out$stress, digits = 2))))
+beta_plot
+
+#ggsave("beta_plot.png", beta_plot, device = "png", height = 6, width = 9, dpi = 300)
+```
+
+Overall community composition does not seem to be strongly driven by cytokine measurements.  
+
+```{r}
+bray = vegdist(species_OTU_table_noctrls[,-(1:ncol(metadata))], method = "bray")
+bray_merge = merge(metadata, as.matrix(bray), by = "row.names")
+centroid = betadisper(bray, group = bray_merge$MPN, type = c("median","centroid"), bias.adjust = FALSE, sqrt.dist = FALSE, add = FALSE)
+centroid_merge <- as.data.frame(centroid$distances) %>% merge(., metadata, by = "row.names") 
+
+plot3 = ggplot(data = centroid_merge) + 
+  aes(x = MPN, y = `centroid$distances`, fill = MPN) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(alpha = 0.5, fill = "black") +
+  theme_bw() +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  scale_x_discrete(labels = c("ET (22)", "MF (26)", "PV (52)")) +
+  labs(x = NULL, y = "Beta dispersion", fill = "MPN", title = "")
+plot3
+```
+
+Beta dispersion significance testing.  
+```{r}
+centroid_lm <- NULL
+centroid_lm$x <- as.numeric(centroid_merge$`centroid$distances`)
+centroid_lm$y <- as.factor(centroid_merge$MPN)
+centroid_lm$i <- as.factor(centroid_merge$Subject)
+centroid_lm <- as.data.frame(centroid_lm)
+centroid_lm <- within(centroid_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y, data = centroid_lm, random = list(i=~1)))
+```
+No significant difference in beta dispersion.  
+
+NMDS colored by time, diet, and MPN subtype.  
+```{r warning=FALSE}
+fig2c = ggplot(data = MDS_points) +
+  aes(x = MDS1, y = MDS2) +
+  theme_bw(base_size = 14, base_line_size = 1) +
+  stat_ellipse(aes(color = MDS_points$MPN), show.legend = F, alpha = 0.75, lty = 3, size = 1) +
+  geom_path(aes(group = Subject), show.legend = F, alpha = 0.75, linetype = 2) +
+  geom_point(aes(pch = MPN, fill = Diet), size = 5, alpha = 0.6) + 
+  scale_shape_manual(values = c(21,22,23), name = "Subtype") +
+  guides(color = F, fill = guide_legend(override.aes = list(shape = 21))) +
+  scale_fill_manual(values=c("forestgreen", "orchid")) +
+  geom_text(label = MDS_points$week, size = 3, color = "black") +
+  annotate("text", x = 1.3, y = 1, size = 5, label = bquote("Stress ="~.(round(MDS_out$stress, digits = 2)))) +
+  scale_color_manual(values = c("steelblue", "orange", "firebrick3"))
+fig2c
+
+#ggsave("Figure_4a.png", beta_plot2, device = "png", dpi = 600, width = 9.25, height = 6.5)
+```
+
+## Significance testing with PERMANOVA  
+Is there a significant effect of diet even at time point one (No intervention)?
+Single factor permanova: Age, sex, MPN not significant
+
+```{r}
+timept1 <- species_OTU_table_noctrls[species_OTU_table_noctrls$week == 1,]
+perma1 = adonis2(formula = timept1[,(ncol(metadata)+1):ncol(timept1)] ~ Diet,
+       data = timept1, method = "bray", permutations = 999, parallel = 32)
+```
+No doesn't seem like it.
+
+What about time point 3 (week 9)?
+single factor permanovas: Lib prep, Age, sex, MPN not significant.
+```{r}
+timept3 <- species_OTU_table_noctrls[species_OTU_table_noctrls$week == 9,]
+perma2 = adonis(formula = timept3[,(ncol(metadata)+1):ncol(timept3)] ~ timept3$dna_extraction + (Diet*adherance_score),
+       data = timept3, method = "bray", permutations = 999, parallel = 32)
+perma2$aov.tab
+```
+Closer, but no.
+
+What about only high adherant MED and low USDA individuals at time point 9?
+5 more individuals in Med group than USDA.
+
+Ran single factor permanovas: library prep, age, sex, and MPN type not significant.  
+Adherance score is same as diet so no interaction
+```{r}
+highonly <- species_OTU_table_noctrls %>% filter(Diet == "MED", adherance_score == "high", week == 9)
+lowonly <- species_OTU_table_noctrls %>% filter(Diet == "USDA", adherance_score == "low", week == 9)
+medhi_usdalow <- bind_rows(lowonly, highonly)
+
+adonis(formula = medhi_usdalow[,(ncol(metadata)+1):ncol(medhi_usdalow)] ~ MPN + Diet + dna_extraction,
+       data = medhi_usdalow, method = "bray", permutations = 999, parallel = 32)
+```
+Yes ~9% at p < 0.05.
+Repeating the exact same PERMANOVA at week 6 is not significant (p = 0.065) and week 15 (p = 0.35).  
+
+Is MPN subtype associated with microbial composition, regardless of diet?
+```{r}
+perma3 = adonis2(formula = species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)] ~ dna_extraction + library_prep + Age + Sex + Diet + MPN / Subject,
+       data = species_OTU_table_noctrls, method = "bray", permutations = 999, parallel = 32, strata = as.factor(species_OTU_table_noctrls$week))
+```
+Yes, 6% including all time points.  
+
+Does the microbiome of the individual significantly change over time?  
+```{r}
+perma4 = adonis2(formula = species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)] ~ as.factor(week),
+       data = species_OTU_table_noctrls, method = "bray", permutations = 999, parallel = 32, strata = as.factor(species_OTU_table_noctrls$Subject))
+```
+
+MPN subtype is not significant in individual time points, but is when all are included.  
+Could be too few samples when faceting data.  
+
+```{r}
+MPNsub1 = species_OTU_table_noctrls[species_OTU_table_noctrls$MPN == "ET",]
+perma5 = adonis2(formula = MPNsub1[,(ncol(metadata)+1):ncol(MPNsub1)] ~ as.factor(week),
+       data = MPNsub1, method = "bray", permutations = 999, parallel = 32, strata = as.factor(MPNsub1$Subject))
+
+MPNsub2 = species_OTU_table_noctrls[species_OTU_table_noctrls$MPN == "MF",]
+perma6 = adonis2(formula = MPNsub2[,(ncol(metadata)+1):ncol(MPNsub2)] ~ as.factor(week),
+       data = MPNsub2, method = "bray", permutations = 999, parallel = 32, strata = as.factor(MPNsub2$Subject))
+
+MPNsub3 = species_OTU_table_noctrls[species_OTU_table_noctrls$MPN == "PV",]
+perma7 = adonis2(formula = MPNsub3[,(ncol(metadata)+1):ncol(MPNsub3)] ~ as.factor(week),
+       data = MPNsub3, method = "bray", permutations = 999, parallel = 32, strata = as.factor(MPNsub3$Subject))
+```
+
+No one MPN subtype significantly changed in composition due to diet.  
+
+Other PERMANOVA findings:  
+* Omitted mutation and baseline MPN symptoms as factors.  
+* Looks like DNA extraction #3 is the outlier and explaining the significance.  
+* This is based on individuals 14 and 31 which overlap multiple extractions.  
+* Extraction 3 is also the most divergent on NMDS.
+* Stratifying by subject reveals non-significant changes over time in both all subjects and Med hi USDA low groups.  
+
+### Overall, this seems to suggests that the diet intervention did not significantly alter the microbial composition but MPN subtype does.  
+
+# Taxonomy
+```{r fig.width = 20, fig.height =  12, warning = FALSE}
+family_OTU_table <- as.data.frame(t(OTU_table_counts[,grep("f__", colnames(OTU_table_counts))])) %>% rownames_to_column() %>% reshape2::melt() %>% mutate(rowname = gsub(".__", "", .$rowname)) %>% 
+  tidyr::separate(., col = rowname, into = c("L1","L2","L3","L4","L5","L6","L7"), sep = "\\|", remove = T, extra = "drop")
+
+family_OTU_table <- family_OTU_table[is.na(family_OTU_table$L6),]
+family_OTU_table <- family_OTU_table[!(family_OTU_table$variable %in% c("FEA03-9", "FEA24-6.2", "FEA24-9.2", 
+                                                                          "FEA25-1.2", "FEA26-1.2", "FEA26-15.2", "FEA26-6.2", "FEA13-1", "FEA13-6")),]
+
+total <- group_by(family_OTU_table, variable) %>% summarise(., total = sum(value))
+family_OTU_table <- merge(family_OTU_table, total, by = "variable")
+family_OTU_table$value <- family_OTU_table$value / family_OTU_table$total
+
+#Take top 10
+top_taxa <- group_by(family_OTU_table, L5) %>% summarise(., top_taxa_tmp = sum(value)) %>% arrange(., desc(top_taxa_tmp)) %>% dplyr::slice(., 1:10)
+high_abundance <- split(top_taxa$L5, 1:NROW(top_taxa))
+high_abundance <- high_abundance[!is.na(high_abundance)]
+
+#Replace not top 10 with other.
+family_OTU_table$L5[family_OTU_table$L5 %in% high_abundance != "TRUE"] <- "Other"
+barplot_df <- aggregate(family_OTU_table$value, by=list(L5=family_OTU_table$L5, Var1 = family_OTU_table$variable), FUN=sum) %>% mutate(., Var1 = str_replace(Var1, "_relab", "")) %>% merge(., metadata, by.x = "Var1", by.y = "row.names")
+
+barplot_df <- barplot_df[order(barplot_df$Subject, barplot_df$L5, barplot_df$week),] #Re order
+barplot_df <- rbind(barplot_df[!(barplot_df$L5 == "Other"),],barplot_df[(barplot_df$L5 == "Other"),]) #Move other to bottom
+barplot_df$L5 <- factor(barplot_df$L5, levels = unique(barplot_df$L5)) #Fix the order
+
+#Custom color pallette.
+Julio_color <- c("#003f5c", "#665191", "#d45087", "#ff7c43","#ffa600", "#7F0A57", "#CD9ABB", "#39A9AB", "#71CFC5", "#007947" ,"gray")
+
+fam_bp = ggplot(data = barplot_df, aes(x = factor(Var1, level = unique(barplot_df$Var1)), weight = x, fill = L5)) +
+  geom_bar(width = 1, color = "black", size = .2) +
+  theme_classic() +
+  facet_grid(.~Diet+MPN+Subject, space = "free", scales = "free") +
+  scale_fill_manual(values = Julio_color) +
+  theme(axis.text.x = element_text(size = 8, color = "black", angle = 90, hjust = 1, vjust = 0.5), axis.title.y = element_text(size = 16, color = "black"), strip.text.x = element_text(size = 12), strip.background = element_rect(fill="lightblue"), legend.text = element_text(size = 12), legend.title = element_text(size = 16)) +
+  labs(x = NULL,
+       y = "Relative abundance", fill = "Family") +
+  geom_text(label = barplot_df$adherance_score, y = 1.025, angle = 90, size = 3, hjust = 0.5) +
+  scale_x_discrete(labels = barplot_df$week)
+fam_bp
+
+top = ggarrange(fig2ab, fig2c, nrow = 1, labels = c("", "c."), widths = c(1.1,1))
+Figure_2 = ggarrange(top, fam_bp, ncol = 1, heights = c(4,6), labels = c("", "d."))
+
+#ggsave("Figure_2.svg", Figure_2, device = "svg", height = 12, width = 16, dpi = 600)
+```
+
+Boxplot of taxonomy.  
+```{r fig.width = 8}
+ggplot(data = barplot_df) +
+  aes(y = x, x = L5, fill = as.factor(week)) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_flip() +
+  theme_bw(base_size = 14, base_line_size = 1) +
+  geom_jitter(position = position_jitterdodge(), size = .5, alpha = .2) +
+  facet_wrap(.~Diet) +
+  labs(y = "Relative Abundance", x = "Family", fill = "Week", subtitle = bquote("Individuals:"~.(length(unique(barplot_df$Subject))))) +
+  theme(plot.title = element_text(hjust = 0.5), strip.background = element_rect(fill="lightblue")) +
+  scale_x_discrete(limits = rev(levels(barplot_df$L5)))
+```
+
+Note: Boxplot order is incorrect and contains both high and low adherant individuals.
+
+## Random Forests
+
+Are there any microbes which correlate with better or worse MPN SAF scores across all time points & diets?
+
+```{r eval=FALSE, include=FALSE}
+write.csv(species_OTU_table_noctrls[-(species_OTU_table_noctrls$weekly_SAF_score == "unknown"),], "Randomforest.csv", quote = F)
+rf_in <- read.csv("Randomforest.csv")
+
+rf_in2 <- rf_in[,-(1:(ncol(metadata)+1))]
+rf_in2$metadata <- as.numeric(rf_in$weekly_SAF_score)
+rf_in2 = rf_in2[!rf_in2$metadata %in% NA,]
+
+rf_out <- rfPermute(formula = metadata ~ ., data = rf_in2, proximity = TRUE, importance = TRUE, nrep = 501, num.cores = 32)
+```
+
+```{r fig.width= 15, fig.height= 10}
+rf_top10_VIP <- as.data.frame(importance(rf_out)) %>% rownames_to_column() %>% arrange(`%IncMSE`) %>% top_n(10, wt = `%IncMSE`) %>% mutate(rowname = str_replace_all(rowname, "\\.", "\\|"))
+
+for (i in 1:10) {
+  assign(paste0("tax_of_int", i), as.data.frame(species_OTU_table_noctrls[-(species_OTU_table_noctrls$weekly_SAF_score == "unknown"),colnames(species_OTU_table_noctrls) == print(rf_top10_VIP$rowname[[i]])]))
+}
+
+tax_of_int_list <- lapply(seq(10), function(i) get(paste0("tax_of_int", i)))
+tax_of_int_list <- lapply(tax_of_int_list, function(x) {colnames(x)[1] <- "Taxon";   x})
+tax_of_int_list <- lapply(tax_of_int_list, function(x) {rownames(x) <- rownames(species_OTU_table_noctrls[-(species_OTU_table_noctrls$weekly_SAF_score == "unknown"),]);   x})
+tax_of_int_list <- lapply(tax_of_int_list, function(x,y) {merge(x, y, by = "row.names")}, metadata)
+
+for (i in 1:10) {
+  assign(paste0("taxa_plot", i), 
+         ggplot(data =tax_of_int_list[[i]]) +
+          aes(x= as.numeric(weekly_SAF_score), y = as.numeric(Taxon)) +
+          geom_point(alpha = 0.75) +
+          geom_smooth(method = lm) +
+          theme_bw() +
+          labs(title = print(rf_top10_VIP$rowname[[i]]), y = "% Relative abundance", x = "MPN SAF Score") +
+          theme(plot.title = element_text(size = 5)))
+}
+
+plot_list <- lapply(seq(9), function(i) get(paste0("taxa_plot", i)))
+rf_taxa_plot <- ggarrange(plotlist = plot_list, ncol = 3, nrow = 3)
+rf_taxa_plot
+#ggsave("SAFvsRelab_plot.png", rf_taxa_plot, device = "png", width = 15, height = 15)
+```
+
+```{r}
+ggplot(data = species_OTU_table_noctrls) +
+  aes(x= as.numeric(weekly_SAF_score), y = `k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Ruminococcaceae|g__Ruminococcus|s__Ruminococcus_lactaris`) +
+  geom_text(label = species_OTU_table_noctrls$Subject, alpha = 0.75) +
+  geom_smooth(method = lm) +
+  theme_bw() +
+  labs(title = "Ruminococcus lactaris", y = "% Relative abundance", x = "MPN SAF Score") +
+  facet_wrap(.~as.factor(week))
+```
+
+```{r}
+time_corr = species_OTU_table_noctrls[species_OTU_table_noctrls$week == 6,]
+cor.test(as.integer(time_corr$weekly_SAF_score), time_corr$`k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Ruminococcaceae|g__Ruminococcus|s__Ruminococcus_lactaris`, method = "spearman", alternative = "greater")
+```
+
+*R. lactaris* is significantly correlated with SAF scores at time points 1 (p = 0.035) and 6 (p = 0.022), so it's a bit backwards.
+
+Are there any significantly different OTUs between diets at week 9, where the PERMANOVA indicated significant differences?
+
+```{r fig.width= 20, fig.height= 10}
+write.csv(medhi_usdalow, "Randomforest.csv", quote = F)
+rf_in <- read.csv("Randomforest.csv")
+
+rf_in2 <- rf_in[,-(1:(ncol(metadata)+1))]
+rf_in2$metadata <- as.factor(rf_in$Diet)
+
+rf_out <- rfPermute(formula = metadata ~ ., data = rf_in2, proximity = TRUE, importance = TRUE, nrep = 501, num.cores = 32)
+rf_top10_VIP <- as.data.frame(importance(rf_out)) %>% rownames_to_column() %>% arrange(MeanDecreaseAccuracy) %>% top_n(10, wt = MeanDecreaseAccuracy) %>% mutate(rowname = str_replace_all(rowname, "\\.", "\\|"))
+```
+
+```{r}
+bovatus_p <- kruskal.test(medhi_usdalow$`k__Bacteria|p__Bacteroidetes|c__Bacteroidia|o__Bacteroidales|f__Bacteroidaceae|g__Bacteroides|s__Bacteroides_vulgatus` ~ medhi_usdalow$Diet)
+
+ggplot(data = medhi_usdalow) +
+  aes(x = Diet, y = `k__Bacteria|p__Bacteroidetes|c__Bacteroidia|o__Bacteroidales|f__Bacteroidaceae|g__Bacteroides|s__Bacteroides_vulgatus`) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = .1) +
+  annotate("text", x = 1.5, y = 10, label = deparse(bquote("Kruskal-Wallis: p ="~.(round(bovatus_p[["p.value"]], digits = 3)))), parse = T) +
+  theme_classic() +
+  labs(y = "Bacteroides vulgatus rel. ab.", title = "Med high vs. USDA low at week 9", subtitle = bquote("No. of subjects:"~.(length(unique(medhi_usdalow$Subject)))))
+```
+
+Yes, it looks like Bacteroides ovatus is signicantly different.   
+First I need to make sure this microbe was not differentially abundant in these individuals to begin with.
+
+```{r}
+bovatus_df <- species_OTU_table_noctrls %>% filter(Subject %in% medhi_usdalow$Subject, week == 1)
+bovatus_p2 <- kruskal.test(bovatus_df$`k__Bacteria|p__Bacteroidetes|c__Bacteroidia|o__Bacteroidales|f__Bacteroidaceae|g__Bacteroides|s__Bacteroides_vulgatus` ~ bovatus_df$Diet)
+
+ggplot(data = bovatus_df) +
+  aes(x = Diet, y = `k__Bacteria|p__Bacteroidetes|c__Bacteroidia|o__Bacteroidales|f__Bacteroidaceae|g__Bacteroides|s__Bacteroides_vulgatus`) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = .1) +
+  annotate("text", x = 1.5, y = 10, label = deparse(bquote("Kruskal-Wallis: p ="~.(round(bovatus_p2[["p.value"]], digits = 3)))), parse = T) +
+  theme_classic() +
+  labs(y = "Bacteroides vulgatus rel. ab.", title = "Same individuals @ week 1", subtitle = bquote("No. of subjects:"~.(length(unique(medhi_usdalow$Subject)))))
+```
+
+Seems like a false positive.  
+Only week 9 is significant but the other time points are very close.
+
+ANCOM2
+```{r}
+ancom_otu <- species_OTU_table_noctrls
+
+ancom_otu <- as.data.frame(t(ancom_otu[,-(1:(1+ncol(metadata)))])) # Transpose otu table.
+
+ancom_meta <- metadata
+ancom_meta$Subject <- as.factor(ancom_meta$Subject)
+ancom_meta$Row.names <- rownames(metadata)
+rownames(ancom_meta) <- NULL
+
+ancom_pre <- feature_table_pre_process(feature_table = ancom_otu, meta_data = ancom_meta, sample_var = "Row.names",
+                                       group_var = "MPN", lib_cut = 0, neg_lb = T)
+
+ancom_res <- ANCOM(feature_table = ancom_pre$feature_table, meta_data = ancom_pre$meta_data, struc_zero = ancom_pre$structure_zeros, 
+                   main_var = "MPN", rand_formula = "~ 1 | Subject", p_adj_method = "none", alpha = 0.05)
+
+ancom_out <- ancom_res$out %>% filter(!(W == "Inf"), detected_0.6 == TRUE) %>% arrange(desc(W))
+```
+No diff. abundant taxa.  
+
+F. prausnitzii
+```{r}
+plot4 = ggplot(data = species_OTU_table_noctrls) +
+  aes(x = MPN, y = `k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Ruminococcaceae|g__Faecalibacterium|s__Faecalibacterium_prausnitzii`/100, fill = MPN) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(alpha = 0.5) +
+  #annotate("text", x = 1.5, y = 10, label = deparse(bquote("Kruskal-Wallis: p ="~.(round(bovatus_p2[["p.value"]], digits = 3)))), parse = T) +
+  theme_bw() +
+  labs(x = NULL, y = "Relative abundance", title = bquote(italic("Faecalibacterium prausnitzii"))) +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  scale_shape_manual(values = c(21, 24)) +
+  scale_x_discrete(labels = c("ET (22)", "MF (26)", "PV (52)")) +
+  scale_y_log10(limits = c(0.001, 1))
+plot4
+```
+
+```{r}
+#Create a species OTU table where the repeated measurements are averaged out.
+species_avg = species_OTU_table_noctrls %>% group_by(Subject) %>% summarise(across(`k__Archaea|p__Euryarchaeota|c__Methanobacteria|o__Methanobacteriales|f__Methanobacteriaceae|g__Methanobrevibacter|s__Methanobrevibacter_arboriphilus`:(ncol(species_OTU_table_noctrls)-1), mean)) %>% remove_rownames() #%>% replace(is.na(.), 0)
+
+read_counts_QF_avg = merge(read_counts_QF, metadata, by.x = "V1", by.y = "row.names") %>% select(!(Sex:ncol(.))) %>% column_to_rownames(var = "V1") %>% group_by(Subject) %>% summarise(total = mean(V2))
+
+spearman_matrix_species = merge(species_avg, read_counts_QF_avg, by = "Subject")
+spearman_matrix_species[,2:(ncol(spearman_matrix_species)-1)] = spearman_matrix_species[,2:(ncol(spearman_matrix_species)-1)] * spearman_matrix_species$total
+spearman_matrix_species = spearman_matrix_species %>% select(!total)
+ 
+#write.table(x = t(spearman_matrix_species), file = "species_avg_OTU_table.txt", quote = F, sep = "\t", row.names = T, col.names = F)
+```
+
+Quick KW test to see if it matches ANCOM.  
+```{r}
+species_avg2 = left_join(spearman_matrix_species, unique(metadata[,c(1,5)]))
+
+KW_results = list()
+
+for (i in 2:(ncol(species_avg2)-1)) {
+  tmp = kruskal.test(species_avg2[,i]~species_avg2$MPN)
+  tmp$taxa = names(species_avg2)[i]
+  KW_results[[length(KW_results)+1]] = tmp
+}
+
+KW_results_pvals = as.data.frame(tibble(taxa = map(KW_results, "taxa"), pval = map(KW_results, "p.value"))) %>%
+  filter(!pval %in% NaN) %>% arrange(as.numeric(pval))
+KW_results_pvals$pval = as.numeric(KW_results_pvals$pval)
+```
+Nothing is diff. abundant.  
+
+Was there in improvement in mean SAF scores over time across Diet?
+```{r}
+ggplot(data = species_OTU_table_noctrls) +
+  aes(x = MPN, y = as.numeric(weekly_SAF_score), fill = Diet, color = as.factor(week)) + 
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitterdodge()) +
+  labs(y = "SAF Score", x = NULL) +
+  theme_bw()
+```
+Generally looks like they decrease over time for both diets.  
+
+Subtract first time point abundances to see which microbes changed the most across diet.  
+``` {r fig.width= 20, fig.height= 10}
+subtract_OTU = species_OTU_table_noctrls[,((1+ncol(metadata)):ncol(species_OTU_table_noctrls))] %>% rownames_to_column() %>% 
+  reshape2::melt(.) %>% merge(metadata,., by.x = "row.names", by.y = "rowname") %>% group_by(Subject) %>% filter(1 %in% week) %>% 
+  mutate(Diff = (value - value[week == 1]))
+
+subtract_OTU2 = reshape2::dcast(data = subtract_OTU, formula = Row.names ~ variable, value.var = "Diff") %>% column_to_rownames(var = "Row.names") %>% merge(metadata, ., by = "row.names")
+
+rf_otu2 = subtract_OTU2[subtract_OTU2$week == 9,] %>% remove_rownames() %>% column_to_rownames(var = "Row.names")
+rf_otu2$metadata = rf_otu2$Diet
+rf_otu3 = rf_otu2[,-(1:ncol(metadata))]
+
+write.csv(rf_otu3, "Randomforest.csv", quote = F)
+rf_in2 <- read.csv("Randomforest.csv", row.names = 1)
+rf_in2$metadata = as.factor(rf_in2$metadata)
+
+rf_out2 <- rfPermute(formula = metadata ~ ., data = rf_in2, proximity = TRUE, importance = TRUE, nrep = 501, num.cores = 32)
+plotImportance(rf_out2, n = 10)
+```
+
+```{r warning=FALSE}
+ggplot(data = rf_in2) +
+  aes(x = metadata, y = rf_in2$k__Bacteria.p__Firmicutes.c__Clostridia.o__Clostridiales.f__Lachnospiraceae.g__Roseburia.s__Roseburia_faecis) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = .1) +
+  theme_classic() +
+  labs(x = NULL, y = "Roseburia_faecis % change in rel. ab.", title = "Week 9 minus week 1", subtitle = bquote("No. of subjects:"~.(length(unique(rf_otu2$Subject)))))
+
+kruskal.test(rf_in2$k__Bacteria.p__Firmicutes.c__Clostridia.o__Clostridiales.f__Lachnospiraceae.g__Roseburia.s__Roseburia_faecis ~ rf_in2$metadata)
+```
+
+```{r}
+ggplot(data = species_OTU_table_noctrls) +
+  aes(x = as.factor(species_OTU_table_noctrls$week), y = species_OTU_table_noctrls$`k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Lachnospiraceae|g__Roseburia|s__Roseburia_faecis`) +
+  geom_boxplot() +
+  geom_point() +
+  #geom_line(aes(group = as.factor(Subject))) +
+  facet_wrap(Diet~.) +
+  theme_bw() +
+  labs(x = "Week", y= "Roseburia faecis relative abundance")
+```
+
+# Cytokine data
+Are any cytokines correlated to alpha diversity?  
+
+```{r}
+#Average to get rid of repeated measures for spearman's
+cytokine_spearmans = specno %>% group_by(as.factor(Subject)) %>% summarise(across(c("specno", names(specno)[21:30]), mean)) %>% filter(complete.cases(.))
+cytokine_spearmans = metadata %>% select(Subject, MPN) %>% remove_rownames() %>% distinct() %>% merge(., cytokine_spearmans, by.x = "Subject", by.y = "as.factor(Subject)")
+
+cytokine_v_richness = list()
+
+for (i in 4:13) {
+  tmp = ggplot(data = cytokine_spearmans) +
+          aes_string(x= names(cytokine_spearmans)[i], y = "specno") +
+          geom_smooth(method = lm, color = "black") +
+          geom_text(aes_string(color = "MPN"), label = cytokine_spearmans$Subject, alpha = 0.75) +
+          theme_bw() +
+          labs(y = "Richness") +
+          scale_color_manual(values=c("steelblue", "orange", "firebrick3"))
+  cytokine_v_richness[[length(cytokine_v_richness)+1]] = tmp
+}
+
+TNFa_spearmans = cor.test(cytokine_spearmans$specno, cytokine_spearmans$TNFa, method = "spearman", alternative = "less")
+TNFa_spearmans$q = p.adjust(TNFa_spearmans$p.value, method = "fdr", n = 10) #I am not sure if I need to p.adj here.
+
+TNFa_plot = cytokine_v_richness[[10]] + annotate("text", x = 10, y = 72, size = 3, hjust = 1, label = bquote("p-adj ="~.(round(TNFa_spearmans$q, digits = 2)))) + annotate("text", x = 10, y = 80, size = 3, hjust = 1, label = bquote("Spearman's \U03C1 ="~.(round(TNFa_spearmans$estimate, digits = 2))))
+
+il12p70_spearmans = cor.test(cytokine_spearmans$specno, cytokine_spearmans$IL_12p70, method = "spearman", alternative = "less")
+il12p70_spearmans$q = p.adjust(il12p70_spearmans$p.value, method = "fdr", n = 10) #I am not sure if I need to p.adj here.
+
+il12p70_plot = cytokine_v_richness[[2]] + annotate("text", x = 1.2, y = 72, size = 3, hjust = 1, label = bquote("p-adj ="~.(round(il12p70_spearmans$q, digits = 2)))) + annotate("text", x = 1.2, y = 80, size = 3, hjust = 1, label = bquote("Spearman's \U03C1 ="~.(round(TNFa_spearmans$estimate, digits = 2))))
+```
+
+Only TNFa and IL12p70 was correlated with species richness.  
+R crashed and I lost the code for evenness vs cyotkine but nothing was significant anyways.  
+TNFa was the most significant result and it had a rho of -.1 and a q value of 1.  
+
+## Genus correlation with cytokine data
+First I need to make a genus OTU table.  
+```{r}
+#Grab genus only from OTU table
+genus_OTU_table <- OTU_table_counts[,grep("g__", colnames(OTU_table_counts))] %>% select(!contains("s__"))
+neg_ctrl2 <-genus_OTU_table[grep("Neg.ctrl", rownames(genus_OTU_table)),] %>% .[,!(colSums(.) == 0)]
+genus_OTU_table <- genus_OTU_table %>% select(!colnames(neg_ctrl2))
+
+#Filter out contaminants
+genus_OTU_table_noctrls <- genus_OTU_table[-grep("Neg.ctrl", rownames(genus_OTU_table)),] %>% 
+  .[-grep("Comm.std", rownames(.)),] %>% merge(metadata, ., by = "row.names") %>% column_to_rownames("Row.names")
+genus_OTU_table_noctrls <- genus_OTU_table_noctrls[!(genus_OTU_table_noctrls$Subject == "13"),]
+genus_OTU_table_noctrls <- genus_OTU_table_noctrls[!(row.names(genus_OTU_table_noctrls) %in% c("FEA03-9", "FEA24-6.2", "FEA24-9.2", "FEA25-1.2", "FEA26-1.2", "FEA26-15.2", "FEA26-6.2")),]
+
+#Change to relative abundance
+genus_OTU_table_noctrls[,(ncol(metadata)+1):ncol(genus_OTU_table_noctrls)] = decostand(genus_OTU_table_noctrls[,(ncol(metadata)+1):ncol(genus_OTU_table_noctrls)], method = "total", MARGIN = 1)
+
+#Drop rows with NA measurements on cytokines
+genus_OTU_table_noctrls = genus_OTU_table_noctrls %>% drop_na()
+```
+
+Create the matrix of cytokine data plus OTU abundance for spearman.  
+NAs were removed.   
+
+```{r}
+#Change to species/genus here if you want to look at species/genus
+genus_avg = genus_OTU_table_noctrls %>% group_by(as.factor(Subject)) %>% summarise(across(IL_10:(ncol(.)-1), mean)) #%>% remove_rownames()
+
+#Filter OTUs that are not present across 20% of individuals (6).
+variance_filter = genus_avg[,-(2:11)] %>% reshape2::melt(.) %>% mutate(not_zero = ifelse(value != 0, T, F)) %>% group_by(variable) %>% summarise(n_not_zero = sum(not_zero)) %>% filter(n_not_zero <= round(nrow(genus_avg)*.2))
+
+#Remove columns which appear in the variance filter list
+genus_avg = genus_avg[,!(colnames(genus_avg) %in% variance_filter$variable)] %>% column_to_rownames(var = "as.factor(Subject)") #Delete col to rowname pipe if running counts
+
+#Remove comments here if you want to do counts instead of relative abundance. Was originally counts because sparcc doesnt like relative abundance
+
+#spearman_matrix = merge(genus_avg, read_counts_QF_avg, by.x = "as.factor(Subject)", by = "Subject")
+#spearman_matrix[,12:(ncol(spearman_matrix)-1)] = spearman_matrix[,12:(ncol(spearman_matrix)-1)] * spearman_matrix$total
+#spearman_matrix = spearman_matrix %>% select(!total) %>% column_to_rownames(var = "as.factor(Subject)")
+
+spearman_matrix = genus_avg
+
+#write.table(x = t(spearman_matrix), file = "cyto_genus_avg_OTU_table.txt", quote = F, sep = "\t", row.names = T, col.names = F)
+```
+
+To do: sum only the p values with a significant p value and a stronger than .3 correlation. Need to if else statements?
+
+Running the correlation.  
+```{r}
+spearman_corr = rcorr(as.matrix(spearman_matrix), type = "spearman")
+
+#Create p_val and dist matrix of cyotkine vs OTUs
+cytokine_corr = spearman_corr$r[-(1:10),-(11:ncol(spearman_corr$r))]
+#rownames(cytokine_corr) = gsub(".*s__","s__", rownames(cytokine_corr)) #Remove all the previous taxonomy. Need to change this here too.
+cytokine_corr_pvals = spearman_corr$P[-(1:10),-(11:ncol(spearman_corr$P))]
+#rownames(cytokine_corr_pvals) = gsub(".*g__","g__", rownames(cytokine_corr_pvals))
+
+heatmap_df = reshape2::melt(as.matrix(cytokine_corr))
+heatmap_df2 = reshape2::melt(as.matrix(cytokine_corr_pvals))
+heatmap_df$p_val = heatmap_df2$value #Combine p values and correlation values
+heatmap_df = heatmap_df %>% mutate(sig_p = ifelse(p_val <= .05, T, F), weak_r = ifelse(abs(value) < .3, T, F))
+heatmap_df4 = heatmap_df %>% group_by(Var1) %>% summarise(n_p = sum(sig_p)) %>% filter(!n_p == 0) #Count the number of significant p values.
+heatmap_df = heatmap_df%>% filter(Var1 %in% heatmap_df4$Var1) #Remove the taxa from the original data frame that don't have any significant correlations.
+
+heatmap_df = heatmap_df %>% mutate(Taxonomy = janitor::make_clean_names(Var1, unique_sep = "=", case = "all_caps"), Cytokine = janitor::make_clean_names(Var2, unique_sep = "=", case = "all_caps")) %>% mutate(Taxonomy = gsub("=.*", "", Taxonomy), Cytokine = gsub("=.*", "", Cytokine)) %>% mutate(Taxonomy = gsub(".*_G_", "", Taxonomy)) %>% mutate(Cytokine = gsub("TN_FA", "TNFa", Cytokine)) %>% mutate(Cytokine = gsub("IF_NG", "IFNg", Cytokine))
+
+#Unmelt filtered dataframe for hierarchical clustering
+heatmap_df5 = reshape2::dcast(data = heatmap_df[,c(3,7,8)], formula = Taxonomy ~ Cytokine) %>% column_to_rownames(var = "Taxonomy")
+
+clust_order1 = hclust(dist(heatmap_df5, method = "euclidean")) #Create hierarchical clustering
+heatmap_df$Taxonomy = factor(heatmap_df$Taxonomy, levels = rownames(heatmap_df5)[clust_order1$order])
+clust_order2 = hclust(dist(t(heatmap_df5), method = "euclidean")) #Create hierarchical clustering
+heatmap_df$Cytokine = factor(heatmap_df$Cytokine, levels = colnames(heatmap_df5)[clust_order2$order])
+
+heatmap_df3 = ggplot(data = heatmap_df) +
+  geom_tile(aes(y = Cytokine, x = Taxonomy, fill = value)) +
+  geom_point(data = heatmap_df[heatmap_df$sig_p == T,], aes(y = Cytokine, x = Taxonomy), shape = 8, size = 1) +
+  scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446", limits=c(-1,1)) +
+  theme_classic() +
+  labs(x = NULL, y = NULL, fill = "Spearman's Rho") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+heatmap_df3
+
+#ggsave(heatmap_df3, filename = "heatmap.png", device = "png", dpi = 600, width = 6, height = 4)
+```
+
+Making a plot of all the abundances of the significantly correlated taxa.  
+```{r}
+corr_abun_plot_df = spearman_matrix %>% filter(complete.cases(.)) %>% select(1:10, unique(heatmap_df$Var1)) %>% janitor::clean_names(case = "all_caps")
+
+taxa_v_cytokines = heatmap_df %>% filter(sig_p == T) %>% mutate(Var1 = janitor::make_clean_names(Var1, unique_sep = "=", case = "all_caps"), Var2 = janitor::make_clean_names(Var2, unique_sep = "=", case = "all_caps")) %>% mutate(Var1 = gsub("=.*", "", Var1), Var2 = gsub("=.*", "", Var2)) %>% mutate(Taxonomy = gsub(".*_G_", "", Var1))
+
+corr_abun_plot_df = metadata %>% select(Subject, MPN) %>% remove_rownames() %>% distinct() %>% merge(., corr_abun_plot_df, by.x = "Subject", by.y = "row.names")
+
+corr_abun_plot = list()
+
+for (i in 1:nrow(taxa_v_cytokines)) {
+  tmp = ggplot(data = corr_abun_plot_df) +
+    aes_string(x = paste(taxa_v_cytokines$Var1[i]), y = paste(taxa_v_cytokines$Var2[i]), color = "MPN") +
+    geom_smooth(method = lm, color = "black") +
+    labs(x = paste(taxa_v_cytokines$Taxonomy[i])) +
+    geom_text(label = corr_abun_plot_df$Subject, alpha = 0.75) +
+    theme_bw() +
+    scale_color_manual(values=c("steelblue", "orange", "firebrick3")) +
+    annotate("text", Inf, Inf, label = bquote("\U03C1 ="~.(round(taxa_v_cytokines$value[i], digits = 2))), hjust = 1, vjust = 1)
+  
+  corr_abun_plot[[length(corr_abun_plot)+1]] = tmp
+}
+
+plot6 = ggarrange(plotlist = corr_abun_plot, common.legend = T, legend = "bottom", ncol = 4, nrow = 9)
+annotate_figure(plot6, top = text_grob("Genus vs. cytokine scatter plots"))
+```
+
+Broken:  
+```{r eval=FALSE, include=FALSE}
+rf_in = species_OTU_table_noctrls %>% select(IL_10:TNFa)
+rf_in$metadata = species_OTU_table_noctrls$MPN 
+rf_in = drop_na(rf_in)
+
+#rf_out <- rfPermute(formula = metadata ~ ., data = rf_in, proximity = TRUE, importance = TRUE, nrep = 501, num.cores = 32)
+
+#proximity.plot(rf_out)
+#varImpPlot(rf_out)
+```
+
+No surprise TNFa is driving the importance.  
+```{r}
+cytokine = list()
+
+for (z in names(rf_in)[1:10]) {
+
+  tmp = ggplot(data = rf_in) +
+  aes_string(x = "metadata", y = z, fill = "metadata") +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(alpha = 0.5, width = 0.25, size = 0.2) +
+  labs(x = NULL) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3"))
+  
+  cytokine[[length(cytokine)+1]] = tmp
+}
+
+cytokine_plot = ggarrange(plotlist = cytokine, nrow = 2, ncol = 5)
+cytokine_plot
+
+#ggsave(cytokine_plot, filename = "Cyotkine_levels.png", device = "png", dpi = 600, width = 8, height = 4)
+```
+
+Significant difference testing among cytokines:
+```{r}
+cytokine_avg = genus_avg %>% select(IL_10:TNFa)
+cytokine_avg = metadata %>% select(Subject, MPN) %>% remove_rownames() %>% distinct() %>% merge(., cytokine_avg, by.x = "Subject", by.y = "row.names")
+
+TukeyHSD(aov(cytokine_avg$TNFa ~ cytokine_avg$MPN))
+TukeyHSD(aov(cytokine_avg$IL_12p70 ~ cytokine_avg$MPN))
+```
+
+## Humann3 pathways vs. taxa and cytokines.  
+Creating dataframe
+```{r}
+pathway_table = read.delim("humann3/MPN_pathabundance_CPM.tsv", check.names = F, row.names = 1)
+pathway_table = as.data.frame(t(pathway_table[!grepl("\\|", rownames(pathway_table)),] %>% 
+                         rename_with(~ gsub('.merged_Abundance', '', .x)))) %>% select(!UNMAPPED:UNINTEGRATED) %>% filter(!rowSums(.) == 0)
+pathway_table = pathway_table[!row.names(pathway_table) %in% c("FEA03-9", "FEA24-6.2", "FEA24-9.2", 
+                                                                          "FEA25-1.2", "FEA26-1.2", "FEA26-15.2", "FEA26-6.2", "FEA13-1", "FEA13-6"),]
+pathway_table = merge(metadata, pathway_table, by = "row.names")
+
+#Eliminate repeated measurements
+pathway_avg = pathway_table %>% group_by(as.factor(Subject)) %>% summarise(across(IL_10:(ncol(.)-1), mean)) %>% remove_rownames() %>% filter(complete.cases(.))
+
+#Filter pathways that are not present across 20% of individuals (5).
+variance_filter2 = pathway_avg[,-(2:11)] %>% reshape2::melt(.) %>% mutate(not_zero = ifelse(value != 0, T, F)) %>% group_by(variable) %>% summarise(n_not_zero = sum(not_zero)) %>% filter(n_not_zero <= round(nrow(pathway_avg)*.2))
+
+#Remove columns which appear in the variance filter list
+pathway_avg = pathway_avg[,!(colnames(pathway_avg) %in% variance_filter2$variable)] %>% column_to_rownames(var = "as.factor(Subject)")
+```
+
+Actual cytokine vs pathway plot. 
+```{r}
+spearman_corr_pw = rcorr(as.matrix(pathway_avg), type = "spearman")
+
+#Create p_val and dist matrix of cyotkine vs OTUs
+cytokine_pw_corr = spearman_corr_pw$r[-(1:10),-(11:ncol(spearman_corr_pw$r))]
+#rownames(cytokine_corr) = gsub(".*s__","s__", rownames(cytokine_corr)) #Remove all the previous taxonomy. Need to change this here too.
+cytokine_pw_corr_pvals = spearman_corr_pw$P[-(1:10),-(11:ncol(spearman_corr_pw$P))]
+#rownames(cytokine_corr_pvals) = gsub(".*g__","g__", rownames(cytokine_corr_pvals))
+
+heatmap_df_pw = reshape2::melt(as.matrix(cytokine_pw_corr))
+heatmap_df2_pw = reshape2::melt(as.matrix(cytokine_pw_corr_pvals))
+heatmap_df_pw$p_val = heatmap_df2_pw$value #Combine p values and correlation values
+heatmap_df_pw = heatmap_df_pw %>% mutate(sig_p = ifelse(p_val <= .05, T, F))
+heatmap_df4_pw = heatmap_df_pw %>% group_by(Var1) %>% summarise(n_p = sum(sig_p)) %>% filter(!n_p == 0) #Count the number of significant p values.
+heatmap_df_pw = heatmap_df_pw%>% filter(Var1 %in% heatmap_df4_pw$Var1) #Remove the taxa from the original data frame that don't have any significant correlations.
+
+#Unmelt filtered dataframe for hierarchical clustering
+heatmap_df5_pw = reshape2::dcast(data = heatmap_df_pw[,1:3], formula = Var1 ~ Var2) %>% column_to_rownames(var = "Var1")
+
+clust_order3 = hclust(dist(heatmap_df5_pw, method = "euclidean")) #Create hierarchical clustering
+heatmap_df_pw$Var1 = factor(heatmap_df_pw$Var1, levels = rownames(heatmap_df5_pw)[clust_order3$order])
+
+clust_order4 = hclust(dist(t(heatmap_df5_pw), method = "euclidean")) #Create hierarchical clustering
+heatmap_df_pw$Var2 = factor(heatmap_df_pw$Var2, levels = colnames(heatmap_df5_pw)[clust_order4$order])
+
+plot9 = ggplot(data = heatmap_df_pw) +
+  geom_tile(aes(x = Var2, y = Var1, fill = value)) +
+  geom_point(data = heatmap_df_pw[heatmap_df_pw$sig_p == T,], aes(x = Var2, y = Var1), shape = 8, size = 1) +
+  scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446", limits=c(-1,1)) +
+  theme_classic() +
+  labs(x = NULL, y = NULL, fill = "Spearman's Rho", title = "Pathway vs. cytokines") +
+  theme(axis.text.x = element_text(angle = 90), axis.text.y = element_text(size = 6))
+```
+
+Visualizing pathways in counts per million.  
+```{r}
+corr_pw_abun_plot_df = pathway_avg %>% select(1:10, unique(heatmap_df_pw$Var1)) %>% janitor::clean_names(case = "all_caps")
+
+pw_v_cytokines = heatmap_df_pw %>% filter(sig_p == T) %>% mutate(Var1 = janitor::make_clean_names(Var1, unique_sep = "=", case = "all_caps"), Var2 = janitor::make_clean_names(Var2, unique_sep = "=", case = "all_caps")) %>% mutate(Var1 = gsub("=.*", "", Var1), Var2 = gsub("=.*", "", Var2))
+
+corr_pw_abun_plot_df = metadata %>% select(Subject, MPN) %>% remove_rownames() %>% distinct() %>% merge(., corr_pw_abun_plot_df, by.x = "Subject", by.y = "row.names")
+
+corr_pw_abun_plot = list()
+
+for (i in 1:nrow(pw_v_cytokines)) {
+  tmp = ggplot(data = corr_pw_abun_plot_df) +
+    aes_string(x = paste(pw_v_cytokines$Var1[i]), y = paste(pw_v_cytokines$Var2[i]), color = "MPN") +
+    geom_smooth(method = lm, color = "black") +
+    labs(x = stringr::str_replace_all(paste(pw_v_cytokines$Var1[i]), "_", " ") %>% stringr::str_wrap(width = 30)) +
+    geom_text(label = corr_pw_abun_plot_df$Subject, alpha = 0.75) +
+    theme_bw() +
+    scale_color_manual(values=c("steelblue", "orange", "firebrick3")) +
+    annotate("text", Inf, Inf, label = bquote("\U03C1 ="~.(round(pw_v_cytokines$value[i], digits = 2))), hjust = 1, vjust = 1) +
+    theme(axis.title.x = element_text(size = 5))
+  
+  corr_pw_abun_plot[[length(corr_pw_abun_plot)+1]] = tmp
+}
+
+plot7 = ggarrange(plotlist = corr_pw_abun_plot, common.legend = T, legend = "bottom", ncol = 9, nrow = 18)
+annotate_figure(plot7, top = text_grob("Pathway vs. cytokine scatter plots"))
+#ggsave(filename = "Cytokine_v_pw.png", plot = plot7, device = "png", dpi = 300, height = 18, width = 24)
+```
+
+Microbes vs. pathways
+```{r}
+taxa_v_pw = pathway_avg %>% select(!IL_10:TNFa) %>% merge(genus_avg, ., by = "row.names") %>% column_to_rownames(var = "Row.names")
+
+taxa_v_pw_spearman = rcorr(as.matrix(taxa_v_pw), type = "spearman")
+
+#Create p_val and dist matrix of pathways vs OTUs
+taxa_v_pw_rho = taxa_v_pw_spearman$r[11:68, 69:ncol(taxa_v_pw_spearman$r)]
+taxa_v_pw_pval = taxa_v_pw_spearman$P[11:68, 69:ncol(taxa_v_pw_spearman$P)]
+
+taxa_v_pw_heatmap_df = reshape2::melt(as.matrix(taxa_v_pw_rho))
+taxa_v_pw_heatmap_df2 = reshape2::melt(as.matrix(taxa_v_pw_pval))
+
+taxa_v_pw_heatmap_df$p_val = taxa_v_pw_heatmap_df2$value #Combine p values and correlation values
+taxa_v_pw_heatmap_df = taxa_v_pw_heatmap_df %>% mutate(sig_p = ifelse(p_val <= .05, T, F))
+taxa_v_pw_heatmap_df4 = taxa_v_pw_heatmap_df %>% group_by(Var1) %>% summarise(n_p = sum(sig_p)) %>% filter(!n_p == 0) #Count the number of significant p values.
+taxa_v_pw_heatmap_df = taxa_v_pw_heatmap_df%>% filter(Var1 %in% taxa_v_pw_heatmap_df4$Var1) #Remove the taxa from the original data frame that don't have any significant correlations.
+
+#Unmelt filtered dataframe for hierarchical clustering
+taxa_v_pw_heatmap_df5 = reshape2::dcast(data = taxa_v_pw_heatmap_df[,1:3], formula = Var1 ~ Var2) %>% column_to_rownames(var = "Var1")
+
+clust_order5 = hclust(dist(taxa_v_pw_heatmap_df5, method = "euclidean")) #Create hierarchical clustering
+taxa_v_pw_heatmap_df$Var1 = factor(taxa_v_pw_heatmap_df$Var1, levels = rownames(taxa_v_pw_heatmap_df5)[clust_order5$order])
+
+clust_order6 = hclust(dist(t(taxa_v_pw_heatmap_df5), method = "euclidean")) #Create hierarchical clustering
+taxa_v_pw_heatmap_df$Var2 = factor(taxa_v_pw_heatmap_df$Var2, levels = colnames(taxa_v_pw_heatmap_df5)[clust_order6$order])
+
+taxa_v_pw_heatmap_df = taxa_v_pw_heatmap_df %>% mutate(Taxonomy = janitor::make_clean_names(Var1, unique_sep = "=", case = "all_caps"), pathway = janitor::make_clean_names(Var2, unique_sep = "=", case = "all_caps")) %>% mutate(Taxonomy = gsub("=.*", "", Taxonomy), pathway = gsub("=.*", "", pathway)) %>% mutate(Taxonomy = gsub(".*_G_", "", Taxonomy), pathway = gsub("_", " ", pathway))
+
+plot8 = ggplot(data = taxa_v_pw_heatmap_df) +
+  geom_tile(aes(x = pathway, y = Taxonomy, fill = value)) +
+  geom_point(data = taxa_v_pw_heatmap_df[taxa_v_pw_heatmap_df$sig_p == T,], aes(x = pathway, y = Taxonomy), shape = 8, size = 1) +
+  scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446", limits=c(-1,1)) +
+  theme_classic() +
+  labs(x = NULL, y = NULL, fill = "Spearman's Rho", title = "Genus vs. pathway") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 4))
+
+#ggsave(filename = "Pathway_v_genus.png", plot = plot8, device = "png", dpi = 300, width = 36, height = 12)
+```
+
+Individual scatter plots of taxa vs. pathways
+```{r eval=FALSE, include=FALSE}
+taxa_v_pw_scatter_df = taxa_v_pw %>% select(unique(taxa_v_pw_heatmap_df$Var2), unique(taxa_v_pw_heatmap_df$Var1)) %>% janitor::clean_names(case = "all_caps")
+
+genus_v_pws = taxa_v_pw_heatmap_df %>% filter(sig_p == T) %>% mutate(Var1 = janitor::make_clean_names(Var1, unique_sep = "=", case = "all_caps"), Var2 = janitor::make_clean_names(Var2, unique_sep = "=", case = "all_caps")) %>% mutate(Var1 = gsub("=.*", "", Var1), Var2 = gsub("=.*", "", Var2))
+
+taxa_v_pw_scatter_df = metadata %>% select(Subject, MPN) %>% remove_rownames() %>% distinct() %>% merge(., taxa_v_pw_scatter_df, by.x = "Subject", by.y = "row.names")
+
+genus_v_pw_plot = list()
+
+for (i in 1:nrow(genus_v_pws)) {
+  tmp = ggplot(data = taxa_v_pw_scatter_df) +
+    aes_string(x = paste(genus_v_pws$Var2[i]), y = paste(genus_v_pws$Var1[i]), color = "MPN") +
+    geom_smooth(method = lm, color = "black") +
+    labs(x = stringr::str_replace_all(paste(genus_v_pws$pathway[i]), "_", " ") %>% stringr::str_wrap(width = 30), y = paste(genus_v_pws$Taxonomy[i])) +
+    geom_text(label = taxa_v_pw_scatter_df$Subject, alpha = 0.75) +
+    theme_bw() +
+    scale_color_manual(values=c("steelblue", "orange", "firebrick3")) +
+    annotate("text", Inf, Inf, label = bquote("\U03C1 ="~.(round(genus_v_pws$value[i], digits = 2))), hjust = 1, vjust = 1) +
+    theme(axis.title.x = element_text(size = 5))
+  
+  genus_v_pw_plot[[length(genus_v_pw_plot)+1]] = tmp
+}
+
+plot9 = ggarrange(plotlist = genus_v_pw_plot, common.legend = T, legend = "bottom")
+annotate_figure(plot9, top = text_grob("Genus vs. pathway scatter plots"))
+#ggsave(filename = "Genus_v_pw.png", plot = plot9, device = "png", dpi = 300, height = 36, width = 36)
+```
+
+Correltation of top 10 microbes with F. prausnitzii
+```{r}
+#Filter OTUs that are not present across 20% of individuals (6).
+species_variance_filter = spearman_matrix_species %>% reshape2::melt(.) %>% mutate(not_zero = ifelse(value != 0, T, F)) %>% group_by(variable) %>% summarise(n_not_zero = sum(not_zero)) %>% filter(n_not_zero <= round(nrow(spearman_matrix_species)*.2))
+
+#Remove columns which appear in the variance filter list
+species_avg3 = spearman_matrix_species[,!(colnames(spearman_matrix_species) %in% species_variance_filter$variable)] %>% column_to_rownames(var = "Subject") %>% decostand(., method = "total", MARGIN = 1)
+
+species_spearman_corr = rcorr(as.matrix(species_avg3), type = "spearman")
+
+fprausnitzii_df = as.data.frame(species_spearman_corr[["r"]][,"k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Ruminococcaceae|g__Faecalibacterium|s__Faecalibacterium_prausnitzii" == colnames(species_spearman_corr[["r"]])])
+fprausnitzii_df$p_val = species_spearman_corr[["P"]][,"k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Ruminococcaceae|g__Faecalibacterium|s__Faecalibacterium_prausnitzii" == colnames(species_spearman_corr[["P"]])]
+names(fprausnitzii_df)[1] = "rho"
+
+fprausnitzii_df = fprausnitzii_df %>% filter(p_val < 0.05) %>% arrange(rho) %>% rownames_to_column() %>% mutate(rowname = gsub(".*s__", "", rowname)) %>% mutate(rowname = gsub("_", " ", rowname)) %>% mutate(rowname = stringr::str_wrap(string = rowname, width = 30))
+fprausnitzii_df$rowname = factor(x = fprausnitzii_df$rowname, levels = fprausnitzii_df$rowname)
+
+fp_plot = ggplot(data = fprausnitzii_df) +
+  aes(x = rho, y = rowname, fill = rho > 0) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(inherit.aes = F, aes(x = rho/2, y = rowname), label = formatC(fprausnitzii_df$p_val, format = "e", digits = 1)) +
+  theme_bw() +
+  labs(x = "Spearman's \U03C1", y = NULL, title ="F. prausnitzii", subtitle = "Significant correlations") +
+  theme(legend.position = "none", plot.title = element_text(face = "italic")) +
+  scale_fill_manual(values = c("firebrick", "forestgreen")) +
+  scale_x_continuous(breaks = seq(-1, 1, by = .1))
+```
+
+Table 1:
+```{r}
+Main_table_1 = metadata %>% select(Subject, Diet, MPN, Mutation, Age, Sex) %>% remove_rownames() %>% distinct()
+#write.table(Main_table_1, file = "Table_1.tsv", sep = "\t", quote = F, row.names = F, col.names = T)
+```
+
+Figure 2:
+```{r}
+fig2de = ggarrange(plot3, plot4, labels = c("c", "d"), widths = c(1, 1.325))
+fig2 = ggarrange(alpha_plot, fig2de, nrow = 1)
+#ggsave("Figure_2.svg", plot = fig2, device = "svg", dpi = 600, width = 11, height = 3)
+```
+
+Figure 3:  
+```{r}
+fig3ab = ggarrange(plot3, plot4, nrow = 1, labels = c("a.", "b."), common.legend = T, legend = "right")
+figure_3 = ggarrange(fig3ab, fp_plot, ncol = 1, labels = c("", "c."))
+#ggsave(filename = "Figure_3.svg", plot = figure_3, device = "svg", dpi = 600, width = 6, height = 6)
+```
+
+Figure 4:
+```{r}
+fig4bc = ggarrange(TNFa_plot, il12p70_plot, ncol = 1, labels = c("b.", "c."), common.legend = T, legend = "right")
+fig4abc =ggarrange(cytokine_plot, fig4bc, nrow = 1, widths = c(2,1), labels = c("a.", ""))
+figure_4 = ggarrange(fig4abc, heatmap_df3, ncol = 1, labels = c("", "d."), heights = c(1,1.25))
+#ggsave("Figure_4.svg", figure_4, device = "svg", height = 8, width = 10, dpi = 600)
+```
+
+Supp. tables:  
+```{r}
+#write.csv(x = perma1, file = "Supp_table_1.csv", quote = F)
+#write.csv(x = perma3, file = "Supp_table_2.csv", quote = F)
+#write.csv(x = perma4, file = "Supp_table_3.csv", quote = F)
+#write.csv(x = rbind(perma5, perma6, perma7), file = "Supp_table_4.csv", quote = F)
+```
+
+Supp. figure 2.  
+```{r}
+suppl_fig2 = ggarrange(alpha_plot, beta_plot, labels = c("", "c."), ncol = 1, heights = c(1,1.5))
+ggsave(filename = "Suppl_figure2.png", plot = suppl_fig2, device = "png", dpi = 600, width = 6, height = 6)
+```
+
+Supp. figure 4
+```{r}
+ggsave(filename = "Suppl_figure4.png", plot = plot6, device = "png", dpi = 600, width = 11, height = 13)
+```
+
+Supp. figure 5
+```{r}
+ggsave(filename = "Suppl_figure5.png", plot = plot9, device = "png", dpi = 600, height = 14, width = 10)
+```
+
+Supp. figure 6
+```{r}
+ggsave(filename = "Suppl_figure6.svg", plot = plot7, device = "svg", dpi = 600, height = 24, width = 18)
+```

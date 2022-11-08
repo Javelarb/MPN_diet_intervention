@@ -1,0 +1,783 @@
+---
+title: "Functional_MPN_analysis"
+author: "Julio Avelar-Barragan"
+date: "10/17/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = T, cache = F)
+options(scipen=10000, digits = 12)
+set.seed(seed = 999)
+```
+
+```{r include=FALSE}
+library(tidyverse)
+library(vegan)
+library(matrixStats)
+library(ape)
+library(rfPermute)
+library(ggpubr)
+library(ggsci)
+library(car)
+library(nlme)
+library(ggrepel)
+library(IHW)
+
+source("/media/julio/Storage/Software/ANCOM-master/programs/ancom.R")
+
+setwd("/media/julio/Storage/MPN/")
+metadata <- read.delim("/media/julio/Storage/MPN/MPN_metadata.txt", row.names=1, check.names = F)
+metadata$Subject <- as.factor(metadata$Subject)
+
+contig_table <- read.delim("Functional/Raw_contig_table.txt", row.names=1, check.names = F)
+contig_table <- contig_table[rowSums(contig_table) >= 10, -grep("Neg_ctrl", colnames(contig_table))] %>% 
+  .[,-grep("Comm_std", colnames(.))] %>% .[,-grep("FEA13", colnames(.))] 
+contig_table <- contig_table[,!(colnames(contig_table) %in% c("FEA03-9", "FEA24-6.2", "FEA24-9.2", "FEA25-1.2", "FEA26-1.2", "FEA26-15.2", "FEA26-6.2"))]
+
+anots <- read.delim("Functional/eggnog.emapper.annotations", comment.char = "#", header=FALSE, row.names = 1)
+CAZyme_annotations = read.delim("dbcan/overview.txt", row.names=1, check.names = F) %>% filter(`#ofTools` == 3)
+
+#Just grab any random sample for the gene lengths to divide by
+gene_lengths = read.delim("Functional/pile_up/FEA02-1_norm.txt", header=FALSE, comment.char="#") %>% .[,1:2]
+colnames(gene_lengths) = c("ORF", "gene_length")
+gene_lengths$gene_length = gene_lengths$gene_length/1000 #in Kb
+
+#From microbe census
+genome_equivs = read.table("mic_cense_genome_equivs_merged.txt")
+
+#Divide reads hitting to ORF by gene length & genome equivalents.
+RPKG = merge(gene_lengths, contig_table, by.x = "ORF", by.y = "row.names") %>% column_to_rownames(var = "ORF")
+RPKG = RPKG[,-1]/RPKG$gene_length
+RPKG2 = merge(genome_equivs, t(RPKG), by.x = "V1", by = "row.names") %>% column_to_rownames(var = "V1")
+RPKG2 = as.data.frame(t(RPKG2[,-1]/RPKG2$V2))
+
+cazyme_table = merge(CAZyme_annotations, RPKG2, by = "row.names") %>% column_to_rownames(var = "Row.names")
+eggnog_table = merge(anots, RPKG2, by = "row.names")
+```
+
+# Cazyme analysis
+
+## Alpha
+
+Alpha diversity by MPN.  
+```{r}
+cazy_rich = as.data.frame(specnumber(t(cazyme_table[,5:ncol(cazyme_table)]))) %>% merge(., metadata, by = "row.names")
+
+ggplot(data = cazy_rich) +
+  aes(x = as.factor(MPN), y = cazy_rich$`specnumber(t(cazyme_table[, 5:ncol(cazyme_table)]))`, fill = as.factor(MPN)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = .25) +
+  theme_bw() +
+  labs(x = NULL, y = "Richness of CAZyme-labeled contigs") +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  scale_x_discrete(labels = c("ET (22)", "MF (26)", "PV (52)")) +
+  theme(legend.position = "none")
+```
+
+Alpha diversity by individual.  
+```{r}
+ggplot(data = cazy_rich) +
+  geom_line(aes(x = as.factor(week), y = cazy_rich$`specnumber(t(cazyme_table[, 5:ncol(cazyme_table)]))`, group = as.factor(Subject), linetype = MPN)) +
+  geom_point(aes(x = as.factor(week), y = cazy_rich$`specnumber(t(cazyme_table[, 5:ncol(cazyme_table)]))`, color = adherance_score)) +
+  facet_wrap(Diet+Subject ~ .) +
+  theme_bw() +
+  labs(x = NULL, y = "Richness of CAZyme-labeled contigs")
+```
+
+## Beta
+Cazyme beta diversity.  
+```{r include=FALSE}
+cazy_nmds = metaMDS(t(cazyme_table[,5:ncol(cazyme_table)]), trymax = 999, parallel = 32)
+cazy_beta = as.data.frame(cazy_nmds$points[,1:2]) %>% merge(., metadata, by = "row.names")
+```
+
+Beta diversity by MPN.  
+```{r message=TRUE}
+ggplot(data = cazy_beta) +
+  aes(x = MDS1, y = MDS2, color = MPN) +
+  theme_bw() +
+  geom_text(label = cazy_beta$Subject, size = 4) +
+  stat_ellipse(linetype = 2, aes(group = MPN), show.legend = F) +
+  annotate("text", x = 1.35, y = -1, size = 4, label = bquote("Stress ="~.(round(cazy_nmds$stress, digits = 2)))) +
+  scale_color_manual(values=c("steelblue", "orange", "firebrick3")) +
+  labs(title = "CAZyme-labeled contig beta diversity")
+```
+
+Mean centroid distance of MPN categories.  
+```{r}
+cazy_merge = t(cazyme_table[,5:ncol(cazyme_table)]) %>% merge(metadata, ., by = "row.names") %>% column_to_rownames(var = "Row.names") 
+cazy_bray = vegdist(cazy_merge[,-(1:ncol(metadata))], method = "bray")
+cazy_bray_merge = merge(metadata, as.matrix(cazy_bray), by = "row.names")
+cazy_centroid = betadisper(cazy_bray, group = cazy_bray_merge$MPN, type = c("median","centroid"), bias.adjust = FALSE, sqrt.dist = FALSE, add = FALSE)
+cazy_centroid_merge <- as.data.frame(cazy_centroid$distances) %>% merge(., metadata, by = "row.names") 
+
+ggplot(data = cazy_centroid_merge) + 
+  aes(x = cazy_centroid_merge$MPN, y = cazy_centroid_merge$`cazy_centroid$distances`, fill = cazy_centroid_merge$MPN) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = .25) +
+  theme_bw() +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  labs(x = NULL, y = "Distance from centroid", fill = "MPN")
+```
+
+LM of centroid distances.  
+We do see significant differences between ET and MF.  
+```{r}
+centroid_lm <- NULL
+centroid_lm$x <- as.numeric(cazy_centroid_merge$`cazy_centroid$distances`)
+centroid_lm$y <- as.factor(cazy_centroid_merge$MPN)
+centroid_lm$i <- as.factor(cazy_centroid_merge$Subject)
+centroid_lm <- as.data.frame(centroid_lm)
+centroid_lm <- within(centroid_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y, data = centroid_lm, random = list(i=~1)))
+```
+
+Cazyme beta diversity by diet.  
+```{r}
+ggplot(data = cazy_beta) +
+  aes(x = MDS1, y = MDS2) +
+  theme_bw() +
+  geom_path(aes(group = as.character(Subject)), show.legend = F, alpha = 0.75, linetype = 2) +
+  geom_point(aes(pch = as.character(week), fill = Diet), size = 6, alpha = 0.6) + 
+  labs(title = "CAZyme-labeled contig beta diversity", subtitle = bquote("Individuals:"~.(length(unique(cazy_beta$Subject))))) +
+  scale_shape_manual(values = c(21,22,23,24), name = "Time point") +
+  guides(color = F, fill = guide_legend(override.aes = list(shape = 21))) +
+  scale_fill_manual(values=c("forestgreen", "steelblue3")) +
+  geom_text(label = cazy_beta$adherance_score, size = 2, color = "black")
+```
+
+```{r}
+adonis(formula = cazy_merge[,(ncol(metadata)+1):ncol(cazy_merge)] ~ as.factor(week),
+       data = cazy_merge, method = "bray", permutations = 999, parallel = 32, strata = as.factor(cazy_merge$Subject))
+```
+No change in individuals over time.  
+
+```{r}
+adonis(formula = cazy_merge[,(ncol(metadata)+1):ncol(cazy_merge)] ~ dna_extraction + library_prep + Age + Sex + MPN / as.factor(Subject),
+       data = cazy_merge, method = "bray", permutations = 999, parallel = 32, strata = as.factor(cazy_merge$week))
+```
+Very similar results to taxonomy PERMANOVAs.  
+
+# Eggnog functional analysis
+
+## Alpha
+
+```{r}
+egg_rich = as.data.frame(specnumber(t(eggnog_table[,23:ncol(eggnog_table)]))) %>% merge(., metadata, by = "row.names")
+
+plot1 = ggplot(data = egg_rich) +
+  aes(x = MPN, y = egg_rich$`specnumber(t(eggnog_table[, 23:ncol(eggnog_table)]))`, fill = MPN) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = .25, alpha = 0.5) +
+  theme_bw() +
+  labs(x = NULL, y = "Gene richness", title = "") +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  scale_x_discrete(labels = c("ET (22)", "MF (26)", "PV (52)")) +
+  theme(legend.position = "none")
+plot1
+```
+
+Calculate shannon and eveness.  
+```{r}
+egg_rich = diversity(t(eggnog_table[, 23:ncol(eggnog_table)])) %>% merge(., egg_rich, by.x = "row.names", by.y = "Row.names")
+egg_rich$even <- egg_rich$x/log(egg_rich$`specnumber(t(eggnog_table[, 23:ncol(eggnog_table)]))`)
+names(egg_rich)[3] = "specno"
+```
+
+Richness plot for genes.  
+```{r}
+rich_plot_df = egg_rich %>% group_by(Diet, week) %>% summarise(Avg_rich = mean(specno), Avg_even = mean(even), sd_rich = sd(specno), sd_even = sd(even), n = n(), stderr_rich = sd_rich/sqrt(n), stderr_even = sd_even/sqrt(n))
+
+rich_plot = ggplot(data = egg_rich) +
+  aes(x = week, y = specno, fill = MPN, pch = Diet) + 
+  geom_point(size = 4, alpha = 0.6, position = position_dodge(.75)) +
+  geom_text(color = "black", size = 2, position = position_dodge(.75), label = egg_rich$Subject) +
+  geom_path(data = rich_plot_df, inherit.aes = F, aes(x = week, y = Avg_rich, color = Diet), size = 2, alpha = 3/4) + 
+  geom_errorbar(data = rich_plot_df, inherit.aes = F, aes(x = week, y = Avg_rich, color = Diet, ymin = Avg_rich - stderr_rich, ymax = Avg_rich + stderr_rich), width = 1, size = 1.5) +
+  annotate("rect", xmin=3, xmax= 13, ymin = -Inf, ymax = Inf, alpha = 0.2, fill = "gray") +
+  theme_bw() +
+  labs(y = "Gene richness", x = "Week", fill = "Subtype") +
+  scale_fill_manual(values = c("steelblue", "orange", "firebrick3")) +
+  scale_shape_manual(values = c(21,24)) +
+  scale_color_manual(values = c("forestgreen", "orchid")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+rich_plot
+```
+
+Evenness plot for genes.  
+```{r}
+plot_even = ggplot(data = egg_rich) +
+  aes(x = MPN, y = even, fill = MPN) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = .25, alpha = 0.5) +
+  theme_bw() +
+  labs(x = NULL, y = "Gene evenness", title = "") +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  scale_x_discrete(labels = c("ET (22)", "MF (26)", "PV (52)")) +
+  theme(legend.position = "none")
+plot_even
+
+even_plot = ggplot(data = egg_rich) +
+  aes(x = week, y = even, fill = MPN, pch = Diet) + 
+  geom_point(size = 4, alpha = 0.6, position = position_dodge(.75)) +
+  geom_text(color = "black", size = 2, position = position_dodge(.75), label = egg_rich$Subject) +
+  geom_path(data = rich_plot_df, inherit.aes = F, aes(x = week, y = Avg_even, color = Diet), size = 2, alpha = 3/4) + 
+  geom_errorbar(data = rich_plot_df, inherit.aes = F, aes(x = week, y = Avg_even, color = Diet, ymin = Avg_even - stderr_even, ymax = Avg_even + stderr_even), width = 1, size = 1.5) +
+  annotate("rect", xmin=3, xmax= 13, ymin = -Inf, ymax = Inf, alpha = 0.2, fill = "gray") +
+  theme_bw() +
+  labs(y = "Gene evenness", x = "Week", fill = "Subtype") +
+  scale_fill_manual(values = c("steelblue", "orange", "firebrick3")) +
+  scale_shape_manual(values = c(21,24)) +
+  scale_color_manual(values = c("forestgreen", "orchid")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+even_plot
+```
+
+Perform LM but subtract first time point because there are difference between both diet groups at baseline
+```{r}
+subtract_specno = egg_rich %>% group_by(Subject) %>% filter(1 %in% week) %>% mutate(Diff = (specno - specno[week == 1]))
+subtract_even = egg_rich %>% group_by(Subject) %>% filter(1 %in% week) %>% mutate(Diff = (even - even[week == 1]))
+
+#Use egg_rich variable if testing MPN and subtract_specno/even if looking at diet because need to account for time point differences. 
+egg_lm <- NULL
+egg_lm$x <- as.numeric(egg_rich$even)
+egg_lm$y <- as.factor(egg_rich$MPN)
+egg_lm$i <- as.factor(egg_rich$Subject)
+egg_lm$d <- as.factor(egg_rich$Diet)
+egg_lm$z <- as.factor(egg_rich$dna_extraction)
+egg_lm$t <- as.factor(egg_rich$week)
+egg_lm <- as.data.frame(egg_lm)
+
+egg_lm <- within(egg_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y + d, data = egg_lm, random = list(i=~1, z=~1)))
+summary(lme(x ~ d, data = egg_lm, random = list(t=~1, z=~1))) 
+```
+
+Similar to CAZyme richness.  
+Significantly decreased richness in MF to PV but not ET.  
+
+## Beta diversity
+
+```{r include=FALSE}
+eggnog_nmds = metaMDS(t(eggnog_table[,23:ncol(eggnog_table)]), trymax = 999, parallel = 32)
+eggnog_beta = as.data.frame(eggnog_nmds$points[,1:2]) %>% merge(., metadata, by = "row.names")
+```
+
+```{r message=TRUE}
+plot3 = ggplot(data = eggnog_beta) +
+  aes(x = MDS1, y = MDS2, color = MPN) +
+  theme_bw() +
+  geom_text(label = eggnog_beta$Subject, size = 6, alpha = .7) +
+  stat_ellipse(linetype = 2, aes(group = MPN), show.legend = F) +
+  #annotate("text", x = .6, y = -.5, size = 6, label = bquote("Stress ="~.(round(eggnog_nmds$stress, digits = 2)))) +
+  scale_color_manual(values=c("steelblue", "orange", "firebrick3")) +
+  theme(axis.text = element_text(size = 12), axis.title = element_text(size = 16), legend.title = element_text(size = 16), legend.text = element_text(size = 12))
+plot3
+```
+Similar to Cazyme results.  
+
+```{r}
+eggnog_beta$week = factor(eggnog_beta$week, levels = c(1,6,9,15))
+eggnog_beta = eggnog_beta %>% arrange(Subject, week)
+
+sfig2c = ggplot(data = eggnog_beta) +
+  aes(x = MDS1, y = MDS2) +
+  theme_bw(base_size = 14, base_line_size = 1) +
+  stat_ellipse(aes(color = eggnog_beta$MPN), show.legend = F, alpha = 3/4, lty = 3, size = 1) +
+  geom_path(aes(group = Subject), show.legend = F, alpha = 0.75, linetype = 2) +
+  geom_point(aes(pch = MPN, fill = Diet), size = 5, alpha = 0.6) + 
+  scale_shape_manual(values = c(21,22,23), name = "Subtype") +
+  guides(color = F, fill = guide_legend(override.aes = list(shape = 21))) +
+  scale_fill_manual(values=c("forestgreen", "orchid")) +
+  geom_text(label = eggnog_beta$week, size = 3, color = "black") +
+  annotate("text", x = 1, y = 1.2, size = 5, label = bquote("Stress ="~.(round(eggnog_nmds$stress, digits = 2)))) +
+  scale_color_manual(values = c("steelblue", "orange", "firebrick3"))
+sfig2c
+```
+
+```{r}
+egg_merge = t(eggnog_table[,23:ncol(eggnog_table)]) %>% merge(metadata, ., by = "row.names") %>% column_to_rownames(var = "Row.names") 
+egg_bray = vegdist(egg_merge[,-(1:ncol(metadata))], method = "bray")
+egg_bray_merge = merge(metadata, as.matrix(egg_bray), by = "row.names")
+egg_centroid = betadisper(egg_bray, group = egg_bray_merge$MPN, type = c("median","centroid"), bias.adjust = FALSE, sqrt.dist = FALSE, add = FALSE)
+egg_centroid_merge <- as.data.frame(egg_centroid$distances) %>% merge(., metadata, by = "row.names") 
+
+plot2 = ggplot(data = egg_centroid_merge) + 
+  aes(x = egg_centroid_merge$MPN, y = egg_centroid_merge$`egg_centroid$distances`, fill = egg_centroid_merge$MPN) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = .25, alpha = 0.5) +
+  theme_bw() +
+  scale_fill_manual(values=c("steelblue", "orange", "firebrick3")) +
+  scale_x_discrete(labels = c("ET (22)", "MF (26)", "PV (52)")) +
+  labs(x = NULL, y = "Beta dispersion", fill = "MPN", title = "") +
+  theme(legend.position = "none")
+plot2
+```
+
+```{r}
+centroid_lm <- NULL
+centroid_lm$x <- as.numeric(egg_centroid_merge$`egg_centroid$distances`)
+centroid_lm$y <- as.factor(egg_centroid_merge$MPN)
+centroid_lm$i <- as.factor(egg_centroid_merge$Subject)
+centroid_lm <- as.data.frame(centroid_lm)
+centroid_lm <- within(centroid_lm, y <- relevel(y, "MF"))
+
+summary(lme(x ~ y, data = centroid_lm, random = list(i=~1)))
+```
+No significant differences in dispersion though, unlike cazyme beta diversity.  
+
+```{r}
+perma1 = adonis2(formula = egg_merge[,(ncol(metadata)+1):ncol(egg_merge)] ~ as.factor(week),
+       data = egg_merge, method = "bray", permutations = 999, parallel = 32, strata = as.factor(egg_merge$Subject))
+```
+No change in individuals over time.  
+
+```{r}
+perma2 = adonis2(formula = egg_merge[,(ncol(metadata)+1):ncol(egg_merge)] ~ dna_extraction + library_prep + Age + Sex + MPN / Subject,
+       data = egg_merge, method = "bray", permutations = 999, parallel = 32, strata = as.factor(egg_merge$week))
+```
+Similar to CAZyme results.  
+
+## Kegg barplot
+```{r fig.width=10}
+brite <- read.delim("/media/julio/Storage/DBs/brite.txt", header=FALSE)
+
+lastValue <- function(x) tail(x[!is.na(x)], 1)
+brite_list <- tidyr::separate(anots, col = V14, into = c("L1","L2","L3","L4","L5","L6","L7","L8","L9","L10", 
+                                                           "L11","L12","L13", "L14","L15","L16","L17","L18","L19",
+                                                           "L20","L21","L22"), sep = "\\,", remove = T, extra = "drop")  %>% .[,13:(13+21)]
+brite_list <- as.data.frame(apply(brite_list, 1, lastValue))
+brite_list <- subset(brite_list, !(brite_list == "")) 
+
+colnames(brite_list) <- "V1"
+brite_list$Row.names <- rownames(brite_list)
+brite_list <- merge(brite_list, brite, by = "V1")
+  
+contig_relab = t(RPKG2)/rowSums(t(RPKG2))
+contig_relab <- contig_relab %>% reshape2::melt()
+contig_relab <- contig_relab[!(contig_relab$value == 0),]
+
+plot_df <- subset(contig_relab, contig_relab$Var2 %in% brite_list$Row.names)
+plot_df2 <- merge(plot_df,brite_list[,c("Row.names","V2")], by.x = "Var2", by.y = "Row.names") %>% merge(., metadata, by.x = "Var1", by.y = "row.names")
+plot_df2$V2 = as.character(plot_df2$V2)
+
+#Take top 10 genes.
+top_genes <- group_by(plot_df2, V2) %>% summarise(., top_genes_tmp = sum(value)) %>% arrange(., desc(top_genes_tmp)) %>% slice(., 1:10)
+high_abundance <- split(top_genes$V2, 1:NROW(top_genes))
+
+#Change non top hits to other.
+plot_df2$V2[plot_df2$V2 %in% high_abundance != "TRUE"] <- "Other"
+plot_df2 <- plot_df2[order(plot_df2$V2),] #Re order
+plot_df2 <- rbind(plot_df2[!(plot_df2$V2 == "Other"),],plot_df2[(plot_df2$V2 == "Other"),]) #Move other to bottom
+plot_df2$V2 <- factor(plot_df2$V2, levels = unique(plot_df2$V2)) #Fix the order
+
+#IF you remove enzyme then you need this next line.
+relab <- aggregate(plot_df2$value, by=list(Var1=plot_df2$Var1), FUN=sum)
+plot_df2 <- merge(plot_df2, relab, by = "Var1")
+plot_df2$relab <- plot_df2$value/plot_df2$x
+plot_df2$week = factor(plot_df2$week, levels = c("1", "6", "9", "15"))
+
+sarah_color <- c("#003f5c", "#665191", "#d45087", "#ff7c43","#ffa600", "#7F0A57", "#CD9ABB", "#39A9AB", "#71CFC5", "#007947", "gray")
+
+kegg_plot = ggplot(data = plot_df2) +
+  aes(x = factor(Var1, level = unique(plot_df2$Var1)), weight = relab, fill = V2) +
+  geom_bar(width = 1, color = "black", size = .2) +
+  theme_classic() +
+  facet_grid(.~Diet+MPN+Subject, space = "free", scales = "free") +
+  scale_fill_manual(values = sarah_color) +
+  theme(axis.text.x = element_text(size = 6, color = "black", angle = 90, hjust = 1, vjust = 0.5), axis.title.y = element_text(size = 16, color = "black"), strip.text.x = element_text(size = 12), strip.background = element_rect(fill="lightblue"), legend.text = element_text(size = 12), legend.title = element_text(size = 16)) +
+  labs(x = NULL, y = "Relative abundance", fill = "KEGG Brite pathway") +
+  geom_text(label = plot_df2$adherance_score, y = 1.025, angle = 90, size = 3, hjust = 0.5) +
+  scale_x_discrete(labels = unique(plot_df2$week))
+```
+
+Other notes:  
+- Cazyme richness is decreased in individuals with MF.  
+- Cazyme beta diversity is more disparate in individuals with MF.  
+- No differences across broad KEGG categories.  
+
+# Diffferential abundance analysis of CAZyme-annotated contigs
+
+ANCOM2 cant handle to the size of the matrix.  
+Random effects does not exist in KW so I need to average the time points.  
+No significant changes in individuals over time so this is okay I think.  
+
+```{r}
+#### IHW ####
+#Filter contigs that are not present across 20% of individuals.
+RPKG2 = RPKG2[1:5000,] #Delete this when you want to run the full dataset (takes forever)
+
+variance_filter = as.matrix(RPKG2) %>% reshape2::melt(.) %>% mutate(not_zero = ifelse(value == 0, F, T)) %>% 
+  group_by(Var1) %>% summarise(n_not_zero = sum(not_zero)) %>% filter(n_not_zero > round(ncol(RPKG2)*0.2))
+
+ihw_df = eggnog_table[eggnog_table$Row.names %in% variance_filter$Var1,] %>% remove_rownames() %>% column_to_rownames(var = "Row.names") %>% t(.) %>% merge(metadata, ., by = "row.names") 
+
+ihw_df[,(ncol(metadata)+2):ncol(ihw_df)] = sapply(ihw_df[,(ncol(metadata)+2):ncol(ihw_df)], as.numeric)
+
+dab_df = ihw_df %>% group_by(as.factor(Subject)) %>% summarise(across((ncol(metadata)+2):(ncol(.)-1), mean))
+dab_df2 = metadata %>% remove_rownames() %>% select(Subject, MPN) %>% distinct() %>% merge(x = ., y = dab_df, by.x = "Subject", by.y = "as.factor(Subject)")
+
+rownames(dab_df2) = dab_df2$Subject
+
+#Differential abundance analysis will be performed using kruskal wallis test with independent hypothesis weighting
+KW_MPN = list()
+
+for (i in 3:ncol(dab_df2)) {
+  tmp = kruskal.test(dab_df2[,i]~dab_df2$MPN)
+  tmp$contig = names(dab_df2)[i]
+  KW_MPN[[length(KW_MPN)+1]] = tmp
+}
+
+pvals_KW_MPN = as.data.frame(tibble(contig = map(KW_MPN, "contig"), pval = map(KW_MPN, "p.value"))) %>%
+  filter(!pval %in% NaN) %>% arrange(as.numeric(pval))
+
+pvals_KW_MPN2 = as.data.frame(colSums(dab_df2[,3:ncol(dab_df2)])) %>%
+  merge(., pvals_KW_MPN, by.x = "row.names", by.y = "contig") %>% column_to_rownames(var = "Row.names")
+
+names(pvals_KW_MPN2)[1] = "rpkg_sum"
+pvals_KW_MPN2$pval = as.numeric(pvals_KW_MPN2$pval)
+
+IHW_MPN = ihw(pval ~ rpkg_sum, alpha = 0.05, data = pvals_KW_MPN2, null_proportion = T, nbins = 5)
+IHW_MPN@df$contig = rownames(pvals_KW_MPN2)
+```
+
+```{r}
+#### Humann3 ####
+pathway_table = read.delim("humann3/MPN_pathabundance_CPM.tsv", check.names = F, row.names = 1)
+pathway_table = as.data.frame(t(pathway_table[!grepl("\\|", rownames(pathway_table)),] %>% 
+                         rename_with(~ gsub('.merged_Abundance', '', .x)))) %>% select(!UNMAPPED:UNINTEGRATED) %>% filter(!rowSums(.) == 0)
+pathway_table = pathway_table[!row.names(pathway_table) %in% c("FEA03-9", "FEA24-6.2", "FEA24-9.2", 
+                                                                          "FEA25-1.2", "FEA26-1.2", "FEA26-15.2", "FEA26-6.2", "FEA13-1", "FEA13-6"),]
+pathway_table = merge(metadata, pathway_table, by = "row.names")
+
+#Eliminate repeated measurements
+pathway_avg = pathway_table %>% group_by(as.factor(Subject)) %>% summarise(across(30:(ncol(.)-1), mean)) %>% remove_rownames() %>% filter(complete.cases(.))
+
+#Filter pathways that are not present across 20% of individuals (5).
+variance_filter2 = pathway_avg[,-(2:11)] %>% reshape2::melt(.) %>% mutate(not_zero = ifelse(value != 0, T, F)) %>% group_by(variable) %>% summarise(n_not_zero = sum(not_zero)) %>% filter(n_not_zero <= round(nrow(pathway_avg)*.2))
+
+#Remove columns which appear in the variance filter list
+pathway_avg = pathway_avg[,!(colnames(pathway_avg) %in% variance_filter2$variable)] %>% column_to_rownames(var = "as.factor(Subject)")
+
+#Merge with MPN subtypes.
+pathway_avg2 = metadata %>% select(Subject, MPN) %>% remove_rownames() %>% distinct() %>% merge(., pathway_avg, by.x = "Subject", by.y = "row.names")
+
+pathway_KW = list()
+
+for (i in 3:ncol(pathway_avg2)) {
+  tmp = kruskal.test(pathway_avg2[,i]~pathway_avg2$MPN)
+  tmp$pathway = names(pathway_avg2)[i]
+  pathway_KW[[length(pathway_KW)+1]] = tmp
+}
+
+pathway_pvals = as.data.frame(tibble(pathway = map(pathway_KW, "pathway"), pval = map(pathway_KW, "p.value"))) %>%
+  filter(!pval %in% NaN) %>% arrange(as.numeric(pval))
+
+pathway_pvals2 = as.data.frame(colSums(pathway_avg2[,3:ncol(pathway_avg2)])) %>%
+  merge(., pathway_pvals, by.x = "row.names", by.y = "pathway") %>% column_to_rownames(var = "Row.names")
+
+names(pathway_pvals2)[1] = "cpm_sum"
+pathway_pvals2$pval = as.numeric(pathway_pvals2$pval)
+
+pathway_IHW = ihw(pvalues = pathway_pvals2$pval, covariates = pathway_pvals2$cpm_sum, alpha = 0.05, null_proportion = T, nbins = 5)
+pathway_IHW@df$pathway = rownames(pathway_pvals2)
+```
+No significantly different pathways either.  
+
+```{r}
+#Heatmap
+heatmap_df = pathway_table %>% select(!Subject:TNFa) %>% column_to_rownames(var = "Row.names") 
+
+heatmap_filter = as.matrix(heatmap_df) %>% reshape2::melt(.) %>% mutate(not_zero = ifelse(value != 0, T, F)) %>% 
+  group_by(Var2) %>% summarise(n_not_zero = sum(not_zero)) %>% filter(n_not_zero <= round(nrow(heatmap_df)*0.2))
+
+zscore_df = sapply(heatmap_df, function(heatmap_df) (heatmap_df-mean(heatmap_df))/sd(heatmap_df)) %>% as.data.frame(.)
+zscore_df = zscore_df[colSums(!is.na(zscore_df)) > 0]
+zscore_df = zscore_df[,!names(zscore_df) %in% heatmap_filter$Var2]
+row.names(zscore_df) = row.names(heatmap_df)
+
+heatmap_df_melt = reshape2::melt(as.matrix(zscore_df)) %>% merge(., metadata, by.x = "Var1", by.y = "row.names") %>% 
+  group_by(MPN) %>% arrange()
+
+clust_order = hclust(dist(zscore_df, method = "euclidean")) #Create hierarchical clustering
+heatmap_df_melt$Var1 = factor(heatmap_df_melt$Var1, levels = row.names(zscore_df)[clust_order$order])
+
+clust_order2 = hclust(dist(t(zscore_df), method = "euclidean")) #Create hierarchical clustering
+heatmap_df_melt$Var2 = factor(heatmap_df_melt$Var2, levels = colnames(zscore_df)[clust_order2$order])
+
+heat = ggplot(data = heatmap_df_melt) +
+  aes(x = Var1, y = Var2, fill = value) +
+  geom_tile() +
+  theme_classic() +
+  facet_grid(~MPN, scales = "free", space = "free") +
+  labs(x = NULL, y = NULL, fill = "Z-score", title = "All functional pathways") +
+  scale_fill_gradient2(low="steelblue3", high="firebrick3") +
+  theme(axis.text.x = element_text(angle = 45, size = 5, hjust = 1), axis.text.y = element_text(size = 3, margin = margin(l = 30)))
+heat
+
+top50 = as.data.frame(sort(colSums(abs(heatmap_df)), decreasing = T)[1:50])
+zscore_df2 = zscore_df[, names(zscore_df) %in% row.names(top50)]
+
+heatmap_df_melt2 = reshape2::melt(as.matrix(zscore_df2)) %>% merge(., metadata, by.x = "Var1", by.y = "row.names") %>% 
+  group_by(MPN) %>% arrange()
+
+clust_order3 = hclust(dist(zscore_df2, method = "euclidean")) #Create hierarchical clustering
+heatmap_df_melt2$Var1 = factor(heatmap_df_melt2$Var1, levels = row.names(zscore_df2)[clust_order3$order])
+
+clust_order4 = hclust(dist(t(zscore_df2), method = "euclidean")) #Create hierarchical clustering
+heatmap_df_melt2$Var2 = factor(heatmap_df_melt2$Var2, levels = colnames(zscore_df2)[clust_order4$order])
+
+heat2 = ggplot(data = heatmap_df_melt2) +
+  aes(x = Var1, y = Var2, fill = value) +
+  geom_tile() +
+  theme_classic() +
+  facet_grid(~MPN, scales = "free", space = "free") +
+  labs(x = NULL, y = NULL, fill = "Z-score", title = "Top 50 most abundant functional pathways") +
+  scale_fill_gradient2(low="steelblue3", high="firebrick3") +
+  theme(axis.text.x = element_text(angle = 45, size = 5, hjust = 1), axis.text.y = element_text(size = 8, margin = margin(l = 30)))
+heat2
+```
+
+# This is old Deseq2 analysis which I decided not to use.  
+Differential abundance analysis of eggnog annotated contigs
+
+```{r eval=FALSE, include=FALSE}
+#Better to use non-normalized data with DESeq2
+egg_table_raw = merge(anots, contig_table, by = "row.names") %>% column_to_rownames(var = "Row.names") %>% select(!V2:V22) %>% t(.)
+egg_raw_merge = merge(x = metadata, y = egg_table_raw, by = "row.names") %>% column_to_rownames(var = "Row.names")
+
+#Average time points to get rid of repeated measurements..
+egg_avg = egg_raw_merge %>% group_by(as.factor(Subject)) %>% summarise(across((ncol(metadata)+1):ncol(egg_raw_merge), mean)) %>% remove_rownames()
+egg_avg = metadata %>% remove_rownames() %>% select(Subject, MPN) %>% distinct() %>% merge(x = ., y = egg_avg, by.x = "Subject", by.y = "as.factor(Subject)")
+
+rownames(egg_avg) = egg_avg$Subject
+egg_avg[,3:ncol(egg_avg)] = round(egg_avg[,3:ncol(egg_avg)])
+
+#Create and run deseq2
+egg_deseq = DESeqDataSetFromMatrix(countData = t(egg_avg[,3:ncol(egg_avg)]), 
+                                colData = egg_avg[,1:2],
+                                design = ~ MPN)
+
+egg_deseq_analysis <- DESeq(egg_deseq, parallel = T)
+
+#Filter genes which only have a padj off less than 0.05
+egg_results1 <- results(egg_deseq_analysis, alpha = 0.05, contrast = c("MPN", "MF", "PV")) %>% subset(., padj < 0.05)
+egg_results2 <- results(egg_deseq_analysis, alpha = 0.05, contrast = c("MPN", "MF", "ET")) %>% subset(., padj < 0.05)
+egg_results3 <- results(egg_deseq_analysis, alpha = 0.05, contrast = c("MPN", "ET", "PV")) %>% subset(., padj < 0.05)
+
+summary(egg_results1)
+summary(egg_results2)
+summary(egg_results3)
+
+#Get results into human readable format.
+egg_summary1 <- bind_rows(egg_results1@listData) %>% dplyr::select("log2FoldChange", "padj") %>% magrittr::set_rownames(egg_results1@rownames) %>% merge(., anots %>% select(4, 5, 21), by = "row.names") %>% tibble::add_column("MF to PV") %>% dplyr::rename(comparison = 7)
+egg_summary2 <- bind_rows(egg_results2@listData) %>% dplyr::select("log2FoldChange", "padj") %>% magrittr::set_rownames(egg_results2@rownames) %>% merge(., anots %>% select(4, 5, 21), by = "row.names") %>% tibble::add_column("MF to ET") %>% dplyr::rename(comparison = 7)
+egg_summary3 <- bind_rows(egg_results3@listData) %>% dplyr::select("log2FoldChange", "padj") %>% magrittr::set_rownames(egg_results3@rownames) %>% merge(., anots %>% select(4, 5, 21), by = "row.names") %>% tibble::add_column("ET to PV") %>% dplyr::rename(comparison = 7)
+
+egg_master_summary = bind_rows(egg_summary1, egg_summary2, egg_summary3)
+
+egg_plot_list = list()
+
+for (i in 1:nrow(egg_master_summary)) {
+    tmp1 = plotCounts(egg_deseq_analysis, gene = egg_master_summary$Row.names[[i]], intgroup = "MPN", pc = 0, returnData = T)
+    
+    tmp2 = ggplot(data = tmp1) +
+      aes(y = count, x = MPN) +
+      geom_boxplot(outlier.shape = NA) +
+      geom_jitter(alpha = .5) +
+      labs(title = egg_master_summary$V6[[i]], subtitle = egg_master_summary$Row.names[[i]], x = NULL, y = "DESeq2 normalized counts") +
+      theme_bw() +
+      theme(legend.position = "none")
+    
+    egg_plot_list[[length(egg_plot_list)+1]] = tmp2
+}
+```
+
+*Not used in final manuscript*  
+Volcano plot for eggnog annotations
+
+*Not used in final manuscript*  
+MF vs PV. The other comparisons were not worth making a volcano plot since it was 4 differentially abundant genes.  
+
+```{r eval=FALSE, include=FALSE}
+volcano_df1 = results(egg_deseq_analysis, alpha = 0.05, contrast = c("MPN", "MF", "PV")) #
+volcano_df2 = bind_rows(volcano_df1@listData) %>% select("log2FoldChange", "pvalue", "padj") %>% magrittr::set_rownames(volcano_df1@rownames) %>% filter(!is.na(pvalue)) %>% merge(., anots %>% select(4, 5, 21), by = "row.names")
+volcano_df2 = volcano_df2 %>% mutate(color = if_else(padj <= 0.05 & abs(log2FoldChange) > 2, T, F, missing = F))
+
+volcano_labels = volcano_df2 %>% filter(color == T, !V6 == "") %>% arrange(desc(abs(log2FoldChange)), padj)
+
+plot4 = ggplot(data = volcano_df2) +
+  aes(x = log2FoldChange, y = -log10(pvalue), color = color) +
+  geom_point(alpha = 0.75, size = .5) + 
+  scale_color_manual(values = c("black", "red")) +
+  labs(title = "MF vs. PV", x = expression("log"[2]*" fold change"), y = expression("-log"[10]*"(p-value)")) +
+  theme_bw() +
+  #geom_text_repel(data = volcano_labels[1:10,], aes(x = log2FoldChange, y = -log10(pvalue), label = V6), color = "black", size = 3) +
+  theme(legend.position = "none")
+plot4
+```
+
+*Not used in final manuscript*  
+```{r eval=FALSE, include=FALSE}
+volcano_df3 = results(egg_deseq_analysis, alpha = 0.05, contrast = c("MPN", "MF", "ET"))
+volcano_df4 = bind_rows(volcano_df3@listData) %>% select("log2FoldChange", "pvalue", "padj") %>% magrittr::set_rownames(volcano_df3@rownames) %>% filter(!is.na(pvalue)) %>% merge(., anots %>% select(4, 5, 21), by = "row.names")
+volcano_df4 = volcano_df4 %>% mutate(color = if_else(padj <= 0.05 & abs(log2FoldChange) > 2, T, F, missing = F))
+
+volcano_labels = volcano_df4 %>% filter(color == T, !V6 == "") %>% arrange(desc(abs(log2FoldChange)), padj)
+
+plot5 = ggplot(data = volcano_df4) +
+  aes(x = log2FoldChange, y = -log10(pvalue), color = color) +
+  geom_point(alpha = 0.75, size = .5) + 
+  scale_color_manual(values = c("black", "red")) +
+  labs(title = "MF vs. ET", x = expression("log"[2]*" fold change"), y = expression("-log"[10]*"(p-value)")) +
+  theme_bw() +
+  #geom_text_repel(data = volcano_labels[1:10,], aes(x = log2FoldChange, y = -log10(pvalue), label = V6), color = "black", size = 3) +
+  theme(legend.position = "none")
+plot5
+```
+
+*Not used in final manuscript*  
+Are any genes from bacteroides correlated with TNFa?  
+
+```{r eval=FALSE, include=FALSE}
+bacteroides_genes = egg_master_summary %>% filter(V5 == "Bacteroidaceae", log2FoldChange > 0)
+
+bacteroides_genes2 = eggnog_table[eggnog_table$Row.names %in% bacteroides_genes$Row.names,] %>% select(!V2:V22) %>% remove_rownames() %>% column_to_rownames(var = "Row.names") %>% t(.) %>% merge(metadata, ., by = "row.names")
+
+#Average to get rid of repeated measures for spearman's
+bacteroides_spearmans = bacteroides_genes2 %>% group_by(Subject) %>% drop_na() %>% summarise(across(c("TNFa":"k111_850723_2"), mean))
+bacteroides_spearmans = metadata %>% select(Subject, MPN) %>% distinct() %>% merge(., bacteroides_spearmans, by = "Subject")
+
+#Significance testing
+bacteroides_TNFa = list()
+for (i in 4:ncol(bacteroides_spearmans)) {
+  tmp = cor.test(bacteroides_spearmans$TNFa, bacteroides_spearmans[,i], method = "spearman", alternative = "greater")
+  bacteroides_TNFa[[length(bacteroides_TNFa)+1]] = tmp
+}
+
+#Assign names
+names(bacteroides_TNFa) = names(bacteroides_spearmans)[4:ncol(bacteroides_spearmans)]
+
+#Create a vector to filter non-significant results from list.
+list_filter = vector()
+for (i in 1:length(bacteroides_TNFa)) {
+  tmp = bacteroides_TNFa[[i]][["p.value"]] < 0.05
+  list_filter[[length(list_filter)+1]] = tmp
+}
+
+bacteroides_TNFa = bacteroides_TNFa[list_filter] 
+bacteroides_TNFa = bacteroides_TNFa[!names(bacteroides_TNFa) %in% "k111_158638_2"] #Only driven by two individuals
+
+plot_names = data.frame(x = names(bacteroides_TNFa), y = c("B. sartorii", "B. vulgatus", "B. vulgatus", "Bacteroidaceae"), z = c("Isoleucine tRNA ligase", "Response regulator", "Type IIA DNA topoisomerase subunit B","Excinuclease ABC subunit UvrA"))
+
+bacteroides_gene_plots = list()
+for (i in 1:length(bacteroides_TNFa)) {
+  tmp = ggplot(data = bacteroides_spearmans) +
+          aes_string(x = "TNFa", y = names(bacteroides_TNFa)[i]) +
+          geom_smooth(method = lm, color = "black") +
+          geom_text(aes_string(color = "MPN"), label = bacteroides_spearmans$Subject, alpha = 0.75) +
+          theme_bw() +
+          theme(legend.position = "none", plot.subtitle = element_text(size = 8)) +
+          scale_color_manual(values=c("steelblue", "orange", "firebrick3")) +
+          labs(y = "RPKG", title = plot_names$y[i], subtitle = plot_names$z[i]) +
+          annotate("text", x = 3, y = 0.10, size = 4, label = bquote("\U03C1 ="~.(round(bacteroides_TNFa[[i]][["estimate"]][["rho"]], digits = 2))))
+  bacteroides_gene_plots[[length(bacteroides_gene_plots)+1]] = tmp
+}
+
+bacteroides_plot = ggarrange(plotlist = bacteroides_gene_plots, labels = c("c","d","e","f"))
+#ggsave("Fig_5cf.svg", plot = bacteroides_plot, device = "svg", dpi = 600, width = 6, height = 4)
+```
+
+*Not used in final manuscript*  
+Are there any differentially abundant genes between diets?  
+Include weeks 6 and 9.  
+Remove genes that are differentially abundant at base line (week 1).  
+
+```{r eval=FALSE, include=FALSE}
+cazyme_diet_avg = cazy_raw_merge %>% filter(week == c(6,9)) %>% group_by(as.factor(Subject)) %>% summarise(across((ncol(metadata)+1):ncol(cazy_raw_merge), mean)) %>% remove_rownames()
+
+cazyme_diet_avg = metadata %>% remove_rownames() %>% select(Subject, Diet) %>% distinct() %>% merge(x = ., y = cazyme_diet_avg, by.x = "Subject", by.y = "as.factor(Subject)")
+
+rownames(cazyme_diet_avg) = cazyme_diet_avg$Subject
+cazyme_diet_avg[,3:ncol(cazyme_diet_avg)] = round(cazyme_diet_avg[,3:ncol(cazyme_diet_avg)])
+
+#Create and run deseq2
+cazy_diet_deseq = DESeqDataSetFromMatrix(countData = t(cazyme_diet_avg[,3:ncol(cazyme_diet_avg)]), 
+                                colData = cazyme_diet_avg[,1:2],
+                                design = ~ Diet)
+
+cazy_diet_deseq_analysis <- DESeq(cazy_diet_deseq, parallel = T)
+
+#Filter genes which only have a padj off less than 0.05
+cazy_diet_results <- results(cazy_diet_deseq_analysis, alpha = 0.05) %>% subset(., padj < 0.05)
+
+summary(cazy_diet_results)
+```
+
+*Not used in final manuscript*  
+No differentially abundant cazymes.    
+
+*Not used in final manuscript*  
+What about for general genes?  
+```{r eval=FALSE, include=FALSE}
+#Average time points to get rid of repeated measurements.
+egg_diet_avg = egg_raw_merge %>% filter(week == c(6,9)) %>% group_by(as.factor(Subject)) %>% summarise(across((ncol(metadata)+1):ncol(egg_raw_merge), mean)) %>% remove_rownames()
+
+egg_diet_avg = metadata %>% remove_rownames() %>% select(Subject, Diet) %>% distinct() %>% merge(x = ., y = egg_diet_avg, by.x = "Subject", by.y = "as.factor(Subject)")
+
+rownames(egg_diet_avg) = egg_diet_avg$Subject
+egg_diet_avg[,3:ncol(egg_diet_avg)] = round(egg_diet_avg[,3:ncol(egg_diet_avg)])
+
+#Create and run deseq2
+egg_diet_deseq = DESeqDataSetFromMatrix(countData = t(egg_diet_avg[,3:ncol(egg_diet_avg)]), 
+                                colData = egg_diet_avg[,1:2],
+                                design = ~ Diet)
+
+egg_diet_deseq_analysis <- DESeq(egg_diet_deseq, parallel = T)
+
+#Filter genes which only have a padj off less than 0.05
+egg_diet_results <- results(egg_deseq_analysis, alpha = 0.05) %>% subset(., padj < 0.05)
+
+summary(egg_diet_results)
+
+#Get results into human readable format.
+egg_diet_summary <- bind_rows(egg_diet_results@listData) %>% dplyr::select("log2FoldChange", "padj") %>% magrittr::set_rownames(egg_diet_results@rownames) %>% merge(., anots %>% select(4, 5, 21), by = "row.names")
+
+test = plotCounts(egg_diet_deseq_analysis, gene = egg_diet_summary$Row.names[[1]], intgroup = "Diet", pc = 0, returnData = T)
+
+ggplot(data = test) +
+  aes(y = count, x = Diet) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(alpha = .5) +
+  labs(title = egg_diet_summary$Row.names[[1]], x = NULL, y = "DESeq2 normalized counts") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+*Not used in final manuscript*  
+There is a single gene from (B vulgatus) that is differentially abundant (a flagellum) between the two diet groups during the weeks of the intervention but it is also differentially abundant at week one so it is a false positive.  
+
+Suppl. figure 1
+```{r}
+ggsave(filename = "Suppl_figure1.png", plot = ggarrange(rich_plot, even_plot, nrow = 1, labels = c("a.", "b."), common.legend = T, legend = "right"), device = "png", width = 7, height = 4, dpi = 600)
+```
+
+Suppl. figure 3
+```{r}
+s3_top = ggarrange(plot1, plot_even, plot2, nrow = 1, labels = c("a.", "b.", "c."))
+ggsave(filename = "Suppl_figure3.png", plot = ggarrange(s3_top, plot3, ncol = 1, labels = c("", "d."), heights = c(1,1.5)), device = "png", dpi = 600, width = 6.5, height = 6)
+```
+
+Suppl. table 5
+```{r}
+write.csv(x = perma1, file = "Supp_table_5.csv", quote = F)
+```
+
+Suppl. table 6
+```{r}
+write.csv(x = perma2, file = "Supp_table_6.csv", quote = F)
+```
