@@ -26,10 +26,10 @@ library(nlme)
 library(ggrepel)
 library(IHW)
 
-source("/media/julio/Storage/Software/ANCOM-master/programs/ancom.R")
+source("ancom.R")
 
 setwd("/media/julio/Storage/MPN/")
-metadata <- read.delim("/media/julio/Storage/MPN/MPN_metadata.txt", row.names=1, check.names = F)
+metadata <- read.delim("MPN_metadata.txt", row.names=1, check.names = F)
 metadata$Subject <- as.factor(metadata$Subject)
 
 contig_table <- read.delim("Functional/Raw_contig_table.txt", row.names=1, check.names = F)
