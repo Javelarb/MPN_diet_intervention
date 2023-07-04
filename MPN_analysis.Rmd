@@ -26,7 +26,7 @@ library(Hmisc)
 source("/media/julio/Storage/Software/ANCOM-master/programs/ancom.R")
 
 setwd("/media/julio/Storage/MPN/")
-metadata <- read.delim("/media/julio/Storage/MPN/MPN_metadata.txt", row.names=1, check.names = F)
+metadata <- read.csv("/media/julio/Storage/MPN/github/metadata_github.csv", row.names=1, check.names = F)
 metadata$Subject <- as.factor(metadata$Subject)
 OTU_table <- read.delim("/media/julio/Storage/MPN/metaphlan3/OTU_table_relab.txt", header = T, check.names = F, comment.char = "#", row.names = 1)
 ```
@@ -480,7 +480,7 @@ Repeating the exact same PERMANOVA at week 6 is not significant (p = 0.065) and 
 
 Is MPN subtype associated with microbial composition, regardless of diet?
 ```{r}
-perma3 = adonis2(formula = species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)] ~ dna_extraction + library_prep + Age + Sex + Diet + MPN / Subject,
+perma3 = adonis2(formula = species_OTU_table_noctrls[,(ncol(metadata)+1):ncol(species_OTU_table_noctrls)] ~ dna_extraction + library_prep + Age + Sex + BMI + Diet + MPN / Subject,
        data = species_OTU_table_noctrls, method = "bray", permutations = 999, parallel = 32, strata = as.factor(species_OTU_table_noctrls$week))
 ```
 Yes, 6% including all time points.  
@@ -813,7 +813,7 @@ Are any cytokines correlated to alpha diversity?
 
 ```{r}
 #Average to get rid of repeated measures for spearman's
-cytokine_spearmans = specno %>% group_by(as.factor(Subject)) %>% summarise(across(c("specno", names(specno)[21:30]), mean)) %>% filter(complete.cases(.))
+cytokine_spearmans = specno %>% group_by(as.factor(Subject)) %>% summarise(across(c("specno", names(specno)[23:32]), mean)) %>% filter(complete.cases(.))
 cytokine_spearmans = metadata %>% select(Subject, MPN) %>% remove_rownames() %>% distinct() %>% merge(., cytokine_spearmans, by.x = "Subject", by.y = "as.factor(Subject)")
 
 cytokine_v_richness = list()
@@ -1181,6 +1181,27 @@ fp_plot = ggplot(data = fprausnitzii_df) +
   theme(legend.position = "none", plot.title = element_text(face = "italic")) +
   scale_fill_manual(values = c("firebrick", "forestgreen")) +
   scale_x_continuous(breaks = seq(-1, 1, by = .1))
+```
+
+Fiber figure.  
+```{r}
+fiber_plot_df = specno %>% group_by(Diet, week) %>% summarise(Avg_fiber = mean(Fiber), sd_fiber = sd(Fiber), n = n(), stderr_fiber = sd_fiber/sqrt(n))
+
+fiber_plot = ggplot(data = specno) +
+  aes(x = week, y = Fiber, fill = MPN, pch = Diet) + 
+  geom_point(size = 4, alpha = 0.6, position = position_dodge(.75)) +
+  geom_text(color = "black", size = 2, position = position_dodge(.75), label = specno$Subject) +
+  geom_path(data = fiber_plot_df, inherit.aes = F, aes(x = week, y = Avg_fiber, color = Diet), size = 2, alpha = 3/4) + 
+  #eom_jitter(data = specno, aes(x = week, y = specno, color = MPN), size = 0.5, width = .5) +
+  geom_errorbar(data = fiber_plot_df, inherit.aes = F, aes(x = week, y = Avg_fiber, color = Diet, ymin = Avg_fiber - stderr_fiber, ymax = Avg_fiber + stderr_fiber), width = 1, size = 1.5) +
+  annotate("rect", xmin=3, xmax= 13, ymin = -Inf, ymax = Inf, alpha = 0.2, fill = "gray") +
+  theme_bw() +
+  labs(y = "Fiber intake (g)", x = "Week", fill = "Subtype") +
+  scale_fill_manual(values = c("steelblue", "orange", "firebrick3")) +
+  scale_shape_manual(values = c(21,24)) +
+  scale_color_manual(values = c("forestgreen", "orchid")) +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+fiber_plot
 ```
 
 Table 1:

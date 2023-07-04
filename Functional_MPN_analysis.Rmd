@@ -13,7 +13,7 @@ options(scipen=10000, digits = 12)
 set.seed(seed = 999)
 ```
 
-```{r include=FALSE}
+```{r}
 library(tidyverse)
 library(vegan)
 library(matrixStats)
@@ -26,10 +26,9 @@ library(nlme)
 library(ggrepel)
 library(IHW)
 
-source("ancom.R")
-
 setwd("/media/julio/Storage/MPN/")
-metadata <- read.delim("MPN_metadata.txt", row.names=1, check.names = F)
+
+metadata <- read.csv("github/metadata_github.csv", row.names=1, check.names = F)
 metadata$Subject <- as.factor(metadata$Subject)
 
 contig_table <- read.delim("Functional/Raw_contig_table.txt", row.names=1, check.names = F)
@@ -338,7 +337,7 @@ perma1 = adonis2(formula = egg_merge[,(ncol(metadata)+1):ncol(egg_merge)] ~ as.f
 No change in individuals over time.  
 
 ```{r}
-perma2 = adonis2(formula = egg_merge[,(ncol(metadata)+1):ncol(egg_merge)] ~ dna_extraction + library_prep + Age + Sex + MPN / Subject,
+perma2 = adonis2(formula = egg_merge[,(ncol(metadata)+1):ncol(egg_merge)] ~ dna_extraction + library_prep + Age + Sex + BMI + MPN / Subject,
        data = egg_merge, method = "bray", permutations = 999, parallel = 32, strata = as.factor(egg_merge$week))
 ```
 Similar to CAZyme results.  
